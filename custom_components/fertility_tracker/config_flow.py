@@ -14,8 +14,6 @@ from homeassistant.helpers.selector import (
     NumberSelectorMode,
     EntitySelector,
     EntitySelectorConfig,
-    EntityFilterSelector,
-    EntityFilterSelectorConfig,
     SelectSelector,
     SelectSelectorConfig,
     SelectOptionDict,
@@ -150,10 +148,10 @@ class OptionsFlow(config_entries.OptionsFlow):
                     default=o.get(CONF_TRIGGER_ENTITIES, []),
                 ): EntitySelector(
                     EntitySelectorConfig(
+                        # NOTE: Using `domain=[...]` here for compatibility,
+                        # since `EntityFilterSelector` isn’t available in your HA build.
+                        domain=["device_tracker", "binary_sensor"],
                         multiple=True,
-                        filter=EntityFilterSelector(
-                            EntityFilterSelectorConfig(domain=["device_tracker", "binary_sensor"])
-                        ),
                     )
                 ),
                 vol.Optional(
