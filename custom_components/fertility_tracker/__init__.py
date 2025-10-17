@@ -250,21 +250,23 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     # Register sidebar panel ONLY if frontend is loaded
     if "frontend" in hass.config.components:
         try:
-            # Signature is (component_name, ...); we keep this in a guard anyway.
             hass.components.frontend.async_register_built_in_panel(
-                component_name="custom",
+                hass,
+                component_name="fertility-tracker",  # 👈 must match ha-panel-fertility-tracker
                 sidebar_title="Fertility Tracker",
                 sidebar_icon="mdi:calendar-heart",
                 frontend_url_path="fertility-tracker",
                 config={
                     "module_url": "/fertility_tracker_frontend/panel.js",
-                    "embed_iframe": False,
-                    "trust_external": False,
+                    # Optional: pass a fixed entry_id (if multiple instances)
+                    # "entry_id": "<YOUR_ENTRY_ID>",
+                    "title": "Fertility Tracker",
                 },
                 require_admin=False,
             )
         except Exception as exc:  # pragma: no cover
             _LOGGER.debug("Frontend not ready; skipping panel registration: %s", exc)
+
     else:
         _LOGGER.debug("Frontend not loaded; skipping panel registration")
 
