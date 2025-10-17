@@ -1,0 +1,14 @@
+{
+  "domain": "fertility_tracker",
+  "name": "Fertility Tracker",
+  "version": "1.0.0",
+  "documentation": "https://github.com/your/repo (optional)",
+  "issue_tracker": "https://github.com/your/repo/issues (optional)",
+  "codeowners": ["@yourhandle"],
+  "requirements": [],
+  "iot_class": "local_polling",
+  "integration_type": "hub",
+  "config_flow": true,
+  "loggers": ["custom_components.fertility_tracker"],
+  "dependencies": ["frontend", "http"]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Fertility Tracker",
+  "content_in_root": false,
+  "domains": ["fertility_tracker"],
+  "render_readme": true
+}

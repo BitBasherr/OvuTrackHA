@@ -1,0 +1,19 @@
+{
+  "title": "Fertility Tracker",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Create Fertility Tracker",
+        "description": "Give this tracker a name"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Fertility Tracker Options",
+        "description": "Tuning, triggers, and notifications"
+      }
+    }
+  }
+}

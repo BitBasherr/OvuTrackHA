@@ -1,0 +1,52 @@
+fertility_tracker_log_period_start:
+  name: Log Period Start
+  description: Add a period start date for a tracker entry
+  fields:
+    entry_id:
+      required: true
+      example: "your_entry_id"
+      selector:
+        text:
+    date:
+      required: true
+      example: "2025-10-16"
+      selector:
+        date:
+    notes:
+      required: false
+      selector:
+        text:
+
+fertility_tracker_log_period_end:
+  name: Log Period End
+  description: Set an end date for the most recent cycle (or a specific cycle_id)
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+    date:
+      required: true
+      selector:
+        date:
+    cycle_id:
+      required: false
+      selector:
+        text:
+
+fertility_tracker_log_sex:
+  name: Log Sex Event
+  description: Log sex event (protected/unprotected)
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+    protected:
+      required: true
+      selector:
+        boolean:
+    notes:
+      required: false
+      selector:
+        text:
