@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["custom_components/fertility_tracker"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

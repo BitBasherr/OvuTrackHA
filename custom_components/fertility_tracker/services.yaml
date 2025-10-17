@@ -1,6 +1,9 @@
-fertility_tracker_log_period_start:
+log_period_start:
   name: Log Period Start
   description: Add a period start date for a tracker entry
+  target:
+    entity:
+      integration: fertility_tracker
   fields:
     entry_id:
       required: true
@@ -17,9 +20,12 @@ fertility_tracker_log_period_start:
       selector:
         text:
 
-fertility_tracker_log_period_end:
+log_period_end:
   name: Log Period End
   description: Set an end date for the most recent cycle (or a specific cycle_id)
+  target:
+    entity:
+      integration: fertility_tracker
   fields:
     entry_id:
       required: true
@@ -34,9 +40,12 @@ fertility_tracker_log_period_end:
       selector:
         text:
 
-fertility_tracker_log_sex:
+log_sex:
   name: Log Sex Event
   description: Log sex event (protected/unprotected)
+  target:
+    entity:
+      integration: fertility_tracker
   fields:
     entry_id:
       required: true

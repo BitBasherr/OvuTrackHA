@@ -4,12 +4,11 @@ import datetime as dt
 import logging
 from typing import Any, Dict, List, Optional
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, callback, ServiceCall
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.helpers.storage import Store
-from homeassistant.helpers import event as hass_event, device_registry as dr
-from homeassistant.components import frontend
+from homeassistant.helpers import event as hass_event
 from homeassistant.components.frontend import async_register_built_in_panel
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.components import websocket_api
@@ -37,7 +36,6 @@ from .const import (
     DEFAULT_QUIET_HOURS_START,
     DEFAULT_QUIET_HOURS_END,
 )
-
 from .helpers import (
     FertilityData,
     CycleEvent,
@@ -45,6 +43,7 @@ from .helpers import (
     today_local,
     parse_time,
     coerce_date,
+    SexEvent,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -251,6 +250,64 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     websocket_api.async_register_command(hass, ws_edit_cycle)
     websocket_api.async_register_command(hass, ws_delete_cycle)
     websocket_api.async_register_command(hass, ws_export_data)
+
+    # ---------- Domain services (for automations) ----------
+    async def _get_runtime_for_service(call: ServiceCall) -> EntryRuntime | None:
+        entry_id = call.data.get("entry_id")
+        runtime = None
+        if entry_id and entry_id in hass.data.get(DOMAIN, {}):
+            runtime = hass.data[DOMAIN][entry_id]
+        else:
+            # If only a single entry exists, allow omitting entry_id for convenience
+            entries = hass.data.get(DOMAIN, {})
+            if len(entries) == 1:
+                runtime = list(entries.values())[0]
+        if runtime is None:
+            _LOGGER.warning("fertility_tracker service called but entry not found. entry_id=%s", entry_id)
+        return runtime
+
+    async def _svc_log_period_start(call: ServiceCall) -> None:
+        runtime = await _get_runtime_for_service(call)
+        if not runtime:
+            return
+        date = coerce_date(call.data["date"])
+        notes = call.data.get("notes")
+        runtime.data.add_period(start=date, end=None, notes=notes)
+        await runtime.async_save()
+
+    async def _svc_log_period_end(call: ServiceCall) -> None:
+        runtime = await _get_runtime_for_service(call)
+        if not runtime:
+            return
+        date = coerce_date(call.data["date"])
+        cycle_id = call.data.get("cycle_id")
+        if cycle_id:
+            ok = runtime.data.edit_cycle(cycle_id=cycle_id, start=None, end=date, notes=None)
+            if not ok:
+                _LOGGER.warning("cycle_id %s not found for period_end", cycle_id)
+        else:
+            # set end for the most recent cycle if missing
+            if runtime.data.cycles:
+                last = runtime.data.cycles[-1]
+                last.end = date
+        await runtime.async_save()
+
+    async def _svc_log_sex(call: ServiceCall) -> None:
+        runtime = await _get_runtime_for_service(call)
+        if not runtime:
+            return
+        protected = bool(call.data["protected"])
+        notes = call.data.get("notes")
+        runtime.data.sex_events.append(
+            SexEvent(ts=today_local(hass), protected=protected, notes=notes)
+        )
+        await runtime.async_save()
+
+    hass.services.async_register(DOMAIN, "log_period_start", _svc_log_period_start)
+    hass.services.async_register(DOMAIN, "log_period_end", _svc_log_period_end)
+    hass.services.async_register(DOMAIN, "log_sex", _svc_log_sex)
+    # ------------------------------------------------------
+
     return True
 
 
