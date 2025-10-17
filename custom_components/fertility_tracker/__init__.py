@@ -13,18 +13,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers import event as hass_event
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.components import websocket_api
-
-# NOTE: We import these types, but we only USE them if the component is loaded.
-#       See guarded UI setup in async_setup().
-try:
-    from homeassistant.components.frontend import async_register_built_in_panel
-except Exception:  # pragma: no cover - import is safe; we guard usage
-    async_register_built_in_panel = None  # type: ignore[assignment]
-
-try:
-    from homeassistant.components.http import StaticPathConfig
-except Exception:  # pragma: no cover
-    StaticPathConfig = object  # type: ignore[assignment]
+from homeassistant.helpers import config_validation as cv
 
 from .const import (
     DOMAIN,
@@ -59,6 +48,9 @@ from .helpers import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# ✅ Hassfest wants a CONFIG_SCHEMA when async_setup exists
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 class EntryRuntime:
@@ -231,9 +223,10 @@ class EntryRuntime:
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up global UI bits if the relevant core integrations are present."""
     # Serve static frontend (panel) ONLY if HTTP is loaded
-    if getattr(hass, "http", None) is not None:
+    http = getattr(hass, "http", None)
+    if http is not None:
         try:
-            path = hass.http.register_static_path(
+            http.register_static_path(
                 "/fertility_tracker_frontend",
                 hass.config.path("custom_components/fertility_tracker/frontend"),
                 cache_headers=True,
@@ -241,17 +234,15 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 name="Fertility Tracker Frontend",
                 allow_directory=True,
             )
-            # Keep the type reference for type-checkers; at runtime this is fine.
-            assert isinstance(path, StaticPathConfig) or isinstance(path, object)
         except Exception as exc:  # pragma: no cover
             _LOGGER.debug("HTTP not ready; skipping static path registration: %s", exc)
     else:
         _LOGGER.debug("HTTP not loaded; skipping static path registration")
 
     # Register sidebar panel ONLY if frontend is loaded
-    if "frontend" in hass.config.components and async_register_built_in_panel:
+    if "frontend" in hass.config.components:
         try:
-            async_register_built_in_panel(
+            hass.components.frontend.async_register_built_in_panel(
                 hass,
                 component_name="custom",
                 sidebar_title="Fertility Tracker",
