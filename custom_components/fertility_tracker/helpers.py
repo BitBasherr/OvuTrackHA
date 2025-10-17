@@ -8,6 +8,7 @@ from statistics import mean, pstdev
 from typing import Any, Dict, List, Optional
 
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from .const import (
     RISK_LOW,
@@ -17,8 +18,14 @@ from .const import (
 
 # ---------------- Utilities ----------------
 
+def _local_tz(hass: HomeAssistant) -> dt.tzinfo:
+    """Return a tzinfo for HA's configured timezone."""
+    return dt_util.get_time_zone(hass.config.time_zone) or dt_util.DEFAULT_TIME_ZONE
+
 def today_local(hass: HomeAssistant) -> dt.datetime:
-    return dt.datetime.now(hass.config.time_zone)
+    """Timezone-aware 'now' in HA local timezone."""
+    # dt_util.now() accepts a tz; returns aware datetime
+    return dt_util.now(_local_tz(hass))
 
 def parse_time(s: str | None) -> dt.time | None:
     if not s:
@@ -163,9 +170,12 @@ class FertilityData:
     def edit_cycle(self, cycle_id: str, start: dt.date | None, end: dt.date | None, notes: str | None) -> bool:
         for c in self.cycles:
             if c.id == cycle_id:
-                if start: c.start = start
-                if end is not None: c.end = end
-                if notes is not None: c.notes = notes
+                if start:
+                    c.start = start
+                if end is not None:
+                    c.end = end
+                if notes is not None:
+                    c.notes = notes
                 self.cycles.sort(key=lambda c: c.start)
                 return True
         return False
