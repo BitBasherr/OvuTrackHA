@@ -17,16 +17,10 @@ from .const import (
 
 # ---------------- Utilities ----------------
 
-def _get_local_tz(hass: HomeAssistant) -> dt.tzinfo:
-    """Return a tzinfo for HA's configured timezone, even if it's stored as a string."""
-    tz = getattr(hass.config, "time_zone", None)
-    if isinstance(tz, dt.tzinfo):
-        return tz
-    return dt_util.get_time_zone(str(tz)) or dt_util.UTC
-
 def today_local(hass: HomeAssistant) -> dt.datetime:
     """Return timezone-aware 'now' in Home Assistant's configured timezone."""
-    return dt_util.now(_get_local_tz(hass))
+    tz = dt_util.get_time_zone(hass.config.time_zone)
+    return dt_util.now(tz)
 
 def parse_time(s: str | None) -> dt.time | None:
     if not s:
@@ -158,8 +152,7 @@ class FertilityData:
             daily_reminder_time=d.get("daily_reminder_time", "09:00:00"),
         )
         fd.cycles = [CycleEvent.from_dict(x) for x in d.get("cycles", [])]
-        # FIX: don't reference fd.sex_events during init
-        fd.sex_events = [SexEvent.from_dict(x) for x in d.get("sex_events", [])]
+        fd.sex_events = [SexEvent.from_dict(x) for x in fd.sex_events or d.get("sex_events", [])]
         fd.pregnancy_tests = [PregnancyTestEvent.from_dict(x) for x in d.get("pregnancy_tests", [])]
         fd.last_notified_date = d.get("last_notified_date")
         return fd
@@ -210,7 +203,7 @@ def _completed_cycle_lengths(cycles: list[CycleEvent]) -> list[int]:
     for i in range(1, len(cycles)):
         prev = cycles[i - 1]
         cur = cycles[i]
-        lens.append((cur.start - prev.start).days)  # diff between period starts
+        lens.append((cur.start - prev.start).days)  # difference between consecutive period start dates
     return lens
 
 
@@ -274,7 +267,7 @@ def calculate_metrics_for_date(data: FertilityData, when: dt.datetime) -> Metric
         else:
             risk_label = "Safe to have unprotected sex today (low pregnancy risk)."
 
-    # Implantation emphasis
+    # Implantation emphasis overrides if today is in implantation window
     if implant_start and implant_end and implant_start <= d <= implant_end:
         risk_label = "High implantation risk today (post-ovulation)."
 
