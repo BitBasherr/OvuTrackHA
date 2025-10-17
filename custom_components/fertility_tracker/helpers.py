@@ -17,9 +17,13 @@ from .const import (
 
 # ---------------- Utilities ----------------
 
+def _get_local_tz(hass: HomeAssistant) -> dt.tzinfo:
+    """Return Home Assistant's configured tzinfo."""
+    return dt_util.get_time_zone(hass.config.time_zone)
+
 def today_local(hass: HomeAssistant) -> dt.datetime:
     """Return timezone-aware 'now' in Home Assistant's configured timezone."""
-    tz = dt_util.get_time_zone(hass.config.time_zone)
+    tz = _get_local_tz(hass)
     return dt_util.now(tz)
 
 def parse_time(s: str | None) -> dt.time | None:
@@ -152,7 +156,8 @@ class FertilityData:
             daily_reminder_time=d.get("daily_reminder_time", "09:00:00"),
         )
         fd.cycles = [CycleEvent.from_dict(x) for x in d.get("cycles", [])]
-        fd.sex_events = [SexEvent.from_dict(x) for x in fd.sex_events or d.get("sex_events", [])]
+        # ✅ Fix bug: don't reference fd.sex_events in its own construction
+        fd.sex_events = [SexEvent.from_dict(x) for x in d.get("sex_events", [])]
         fd.pregnancy_tests = [PregnancyTestEvent.from_dict(x) for x in d.get("pregnancy_tests", [])]
         fd.last_notified_date = d.get("last_notified_date")
         return fd
@@ -195,6 +200,8 @@ class Metrics:
     fertile_window_end: dt.date | None
     implantation_window_start: dt.date | None
     implantation_window_end: dt.date | None
+    # New: simple machine-readable level + human label
+    risk_level: str | None
     risk_label: str | None
 
 
@@ -203,7 +210,7 @@ def _completed_cycle_lengths(cycles: list[CycleEvent]) -> list[int]:
     for i in range(1, len(cycles)):
         prev = cycles[i - 1]
         cur = cycles[i]
-        lens.append((cur.start - prev.start).days)  # difference between consecutive period start dates
+        lens.append((cur.start - prev.start).days)  # difference between consecutive period starts
     return lens
 
 
@@ -258,17 +265,23 @@ def calculate_metrics_for_date(data: FertilityData, when: dt.datetime) -> Metric
         implant_end = pred_ovulation + dt.timedelta(days=10)
 
     # Risk labeling
-    risk_label = None
+    risk_level: str | None = None
+    risk_label: str | None = None
+
     if fertile_start and fertile_end:
         if fertile_start <= d <= fertile_end:
+            risk_level = RISK_HIGH
             risk_label = "High pregnancy risk today (fertile window)."
         elif (fertile_start - dt.timedelta(days=2)) <= d <= (fertile_end + dt.timedelta(days=2)):
+            risk_level = RISK_MEDIUM
             risk_label = "Medium pregnancy risk today (near fertile window)."
         else:
+            risk_level = RISK_LOW
             risk_label = "Safe to have unprotected sex today (low pregnancy risk)."
 
-    # Implantation emphasis overrides if today is in implantation window
+    # Implantation emphasis overrides label (keep level high)
     if implant_start and implant_end and implant_start <= d <= implant_end:
+        risk_level = RISK_HIGH
         risk_label = "High implantation risk today (post-ovulation)."
 
     return Metrics(
@@ -282,5 +295,6 @@ def calculate_metrics_for_date(data: FertilityData, when: dt.datetime) -> Metric
         fertile_window_end=fertile_end,
         implantation_window_start=implant_start,
         implantation_window_end=implant_end,
+        risk_level=risk_level,
         risk_label=risk_label,
     )

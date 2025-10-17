@@ -4,6 +4,7 @@ import datetime as dt
 import pytest
 from freezegun import freeze_time
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from custom_components.fertility_tracker.const import DOMAIN
 from custom_components.fertility_tracker.helpers import coerce_date
@@ -19,9 +20,11 @@ async def test_sensor_states_and_calendar_events(hass: HomeAssistant, setup_inte
     runtime.data.add_period(start=coerce_date("2025-09-02"), end=coerce_date("2025-09-06"), notes=None)
     await runtime.async_save()
 
+    tz = dt_util.get_time_zone(hass.config.time_zone)
+
     # Freeze to a deterministic date
     with freeze_time("2025-09-10 12:00:00"):
-        await hass.helpers.entity_component.async_update_entity(f"sensor.wife_tracker_fertility_risk")
+        await hass.helpers.entity_component.async_update_entity("sensor.wife_tracker_fertility_risk")
         state = hass.states.get("sensor.wife_tracker_fertility_risk")
         assert state is not None
         assert state.state in ("low", "medium", "high")
@@ -36,8 +39,8 @@ async def test_sensor_states_and_calendar_events(hass: HomeAssistant, setup_inte
         cal_entity = next(iter(calendar))
         events = await cal_entity.async_get_events(
             hass,
-            dt.datetime(2025, 9, 1, tzinfo=hass.config.time_zone),
-            dt.datetime(2025, 10, 1, tzinfo=hass.config.time_zone),
+            dt.datetime(2025, 9, 1, tzinfo=tz),
+            dt.datetime(2025, 10, 1, tzinfo=tz),
         )
         # Should include logged Period events and predicted ranges
         summaries = [e.summary for e in events]
