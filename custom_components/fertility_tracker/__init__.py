@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import inspect
+import os
+import shutil
 from typing import Optional, Callable, Any, Dict
 
 import voluptuous as vol
@@ -16,7 +17,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.components import websocket_api
 from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
-from homeassistant.setup import async_when_setup  # ✅ correct place
+from homeassistant.setup import async_when_setup
 
 from .const import (
     DOMAIN,
@@ -53,6 +54,36 @@ from .helpers import (
 _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+def _copy_tree(src: str, dst: str) -> None:
+    """Copy files from src to dst (update only if changed)."""
+    if not os.path.isdir(src):
+        return
+    os.makedirs(dst, exist_ok=True)
+    for root, _dirs, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        out_dir = os.path.join(dst, "" if rel == "." else rel)
+        os.makedirs(out_dir, exist_ok=True)
+        for f in files:
+            s = os.path.join(root, f)
+            d = os.path.join(out_dir, f)
+            try:
+                if not os.path.exists(d) or os.path.getmtime(s) > os.path.getmtime(d):
+                    shutil.copy2(s, d)
+            except Exception as exc:  # pragma: no cover
+                _LOGGER.debug("Copy failed for %s -> %s: %s", s, d, exc)
+
+
+async def _ensure_www_bundle(hass: HomeAssistant) -> None:
+    """Mirror our frontend into /config/www/fertility_tracker for /local/ serving."""
+    src = hass.config.path("custom_components/fertility_tracker/frontend")
+    dst = hass.config.path("www/fertility_tracker")
+    try:
+        await hass.async_add_executor_job(_copy_tree, src, dst)
+        _LOGGER.debug("Frontend copied to %s", dst)
+    except Exception as exc:  # pragma: no cover
+        _LOGGER.debug("Failed copying frontend: %s", exc)
 
 
 class EntryRuntime:
@@ -98,7 +129,6 @@ class EntryRuntime:
         _LOGGER.debug("Saved fertility data for %s", self.entry.entry_id)
 
     async def async_setup_timers_and_triggers(self) -> None:
-        # Daily reminder timer
         if self._timer_unsub:
             self._timer_unsub()
             self._timer_unsub = None
@@ -119,7 +149,6 @@ class EntryRuntime:
             second=target_time.second,
         )
 
-        # Trigger entities (arrival / on) for risk notification
         if self._listeners:
             for unsub in self._listeners:
                 try:
@@ -147,7 +176,6 @@ class EntryRuntime:
         await self.async_save()
 
     async def _trigger_entity_changed(self, event) -> None:
-        """On arrival (home) or binary_sensor turns on, notify today's risk."""
         new_state = event.data.get("new_state")
         if not new_state:
             return
@@ -159,7 +187,6 @@ class EntryRuntime:
             await self._notify_today_risk(reason=f"{new_state.entity_id} turned on")
 
     async def _maybe_send_expected_period_prompt(self) -> None:
-        """If expected period date is today±1 and not logged, ask via notify.*"""
         metrics = calculate_metrics_for_date(self.data, today_local(self.hass))
         if metrics.next_period_date is None:
             return
@@ -179,7 +206,6 @@ class EntryRuntime:
                 )
 
     def _quiet_hours(self, now: dt.datetime) -> bool:
-        """Check if now is within quiet hours range (may span midnight)."""
         try:
             start = parse_time(self.data.quiet_hours_start)
             end = parse_time(self.data.quiet_hours_end)
@@ -193,12 +219,11 @@ class EntryRuntime:
             )
             if start_dt <= end_dt:
                 return start_dt <= now <= end_dt
-            return now >= start_dt or now <= end_dt  # spans midnight
+            return now >= start_dt or now <= end_dt
         except Exception:
             return False
 
     async def _notify_today_risk(self, reason: str) -> None:
-        """Notify today's risk using a real tzinfo (works with tests)."""
         tz = dt_util.get_time_zone(self.hass.config.time_zone)
         now = dt_util.now(tz)
 
@@ -226,61 +251,23 @@ class EntryRuntime:
             except ValueError:
                 domain, service = "notify", svc
             await self.hass.services.async_call(
-                domain,
-                service,
-                {"title": title, "message": message},
-                blocking=True,
+                domain, service, {"title": title, "message": message}, blocking=True
             )
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up static path, sidebar panel, and WS API."""
+    """Bootstrap frontend (copy → /local), register panel, and WS API."""
+    # 1) Ensure /local bundle is in place (works on all HA versions)
+    await _ensure_www_bundle(hass)
 
-    # ---------- static path: /fertility_tracker_frontend/* ----------
-    async def _register_static(_hass: HomeAssistant, _component: str) -> None:
-        http = getattr(_hass, "http", None)
-        if http is None:
-            _LOGGER.debug("HTTP not loaded; cannot register static path")
-            return
-        path = _hass.config.path("custom_components/fertility_tracker/frontend")
-        try:
-            http.register_static_path(
-                "/fertility_tracker_frontend",
-                path,
-                cache_headers=True,
-                require_auth=True,
-                name="Fertility Tracker Frontend",
-                allow_directory=True,
-            )
-        except TypeError:
-            # older cores without allow_directory
-            http.register_static_path(
-                "/fertility_tracker_frontend",
-                path,
-                cache_headers=True,
-                require_auth=True,
-                name="Fertility Tracker Frontend",
-            )
-        _LOGGER.debug("Static path registered at /fertility_tracker_frontend")
-
-    if getattr(hass, "http", None) is not None:
-        await _register_static(hass, "http")
-    else:
-        async_when_setup(hass, "http", _register_static)
-
-    # ---------- sidebar panel: /fertility-tracker ----------
+    # 2) Register sidebar panel (load from /local)
     async def _register_panel(_hass: HomeAssistant, _component: str) -> None:
-        # remove if exists (handle both sync/async variants)
         try:
-            rm = _hass.components.frontend.async_remove_panel
-            if inspect.iscoroutinefunction(rm):
-                await rm("fertility-tracker")
-            else:
-                rm("fertility-tracker")
-        except Exception:
-            pass
-
-        try:
+            # Remove if already there (avoid duplicates on reload)
+            try:
+                _hass.components.frontend.async_remove_panel("fertility-tracker")
+            except Exception:
+                pass
             _hass.components.frontend.async_register_panel(
                 _hass,
                 component_name="custom",
@@ -289,22 +276,22 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 sidebar_icon="mdi:calendar-heart",
                 require_admin=False,
                 config={
-                    "module_url": "/fertility_tracker_frontend/panel.js",
+                    "module_url": "/local/fertility_tracker/panel.js",
                     "embed_iframe": False,
                     "trust_external": False,
                 },
                 update=False,
             )
-            _LOGGER.info("Registered sidebar panel at /fertility-tracker")
+            _LOGGER.info("Sidebar panel registered at /fertility-tracker")
         except Exception as exc:  # pragma: no cover
-            _LOGGER.exception("Failed to register sidebar panel: %s", exc)
+            _LOGGER.debug("Failed to register panel: %s", exc)
 
     if "frontend" in hass.config.components:
         await _register_panel(hass, "frontend")
     else:
         async_when_setup(hass, "frontend", _register_panel)
 
-    # ---------- WebSocket API ----------
+    # 3) WebSocket API
     websocket_api.async_register_command(hass, ws_discover_entry)
     websocket_api.async_register_command(hass, ws_list_cycles)
     websocket_api.async_register_command(hass, ws_add_period)
@@ -312,7 +299,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     websocket_api.async_register_command(hass, ws_delete_cycle)
     websocket_api.async_register_command(hass, ws_export_data)
 
-    # ---------- Domain services ----------
+    # 4) Services
     async def _get_runtime_for_service(call: ServiceCall) -> EntryRuntime | None:
         entry_id = call.data.get("entry_id")
         runtime = None
@@ -400,22 +387,20 @@ def _get_runtime(hass: HomeAssistant, entry_id: str) -> EntryRuntime:
     return hass.data[DOMAIN][entry_id]
 
 
-# ==================== WebSocket API ====================
+# -------------------- WebSocket API --------------------
 
 @websocket_api.websocket_command(
     {vol.Required("type"): "fertility_tracker/discover_entry"}
 )
 @websocket_api.async_response
 async def ws_discover_entry(hass: HomeAssistant, connection, msg: Dict[str, Any]):
-    """Return the first (or only) entry we have; not admin-only."""
     entries: dict[str, EntryRuntime] = hass.data.get(DOMAIN, {})
     if not entries:
         connection.send_result(msg["id"], {"found": False})
         return
     entry_id, runtime = next(iter(entries.items()))
     connection.send_result(
-        msg["id"],
-        {"found": True, "entry_id": entry_id, "name": runtime.data.name},
+        msg["id"], {"found": True, "entry_id": entry_id, "name": runtime.data.name}
     )
 
 
