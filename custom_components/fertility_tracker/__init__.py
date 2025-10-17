@@ -15,7 +15,7 @@ from homeassistant.helpers import event as hass_event
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.components import websocket_api
 from homeassistant.helpers import config_validation as cv
-from homeassistant.util import dt as dt_util  # HA's timezone helpers
+from homeassistant.util import dt as dt_util  # ✅ HA tz helpers
 from homeassistant.setup import async_when_setup
 
 from .const import (
@@ -117,7 +117,7 @@ class EntryRuntime:
             for unsub in self._listeners:
                 try:
                     unsub()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
             self._listeners.clear()
 
@@ -132,7 +132,7 @@ class EntryRuntime:
         for unsub in self._listeners:
             try:
                 unsub()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         self._listeners.clear()
         await self.async_save()
@@ -179,7 +179,7 @@ class EntryRuntime:
             if start_dt <= end_dt:
                 return start_dt <= now <= end_dt
             return now >= start_dt or now <= end_dt  # spans midnight
-        except Exception:  # noqa: BLE001
+        except Exception:
             return False
 
     async def _notify_today_risk(self, reason: str) -> None:
@@ -218,24 +218,28 @@ class EntryRuntime:
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up global UI bits and domain services."""
 
-    async def _ensure_frontend():
-        # Wait until HTTP is ready, then expose /fertility_tracker_frontend/*
-        await async_when_setup(hass, "http")
+    # --- Static files under /fertility_tracker_frontend ---
+    def _register_static_path(_hass: HomeAssistant, _component: str) -> None:
         try:
             static_dir = str(Path(__file__).parent / "frontend")
-            hass.http.register_static_path("/fertility_tracker_frontend", static_dir, cache_headers=True)
+            _hass.http.register_static_path("/fertility_tracker_frontend", static_dir, cache_headers=True)
             _LOGGER.info(
                 "fertility_tracker: registered static path /fertility_tracker_frontend -> %s",
                 static_dir,
             )
         except Exception as exc:  # pragma: no cover
-            _LOGGER.warning("fertility_tracker: failed to register static path: %s", exc)
+            _LOGGER.debug("fertility_tracker: failed to register static path: %s", exc)
 
-        # Wait until frontend is ready, then add the sidebar panel
-        await async_when_setup(hass, "frontend")
+    if "http" in hass.config.components and hasattr(hass, "http"):
+        _register_static_path(hass, "http")
+    else:
+        async_when_setup(hass, "http", _register_static_path)
+
+    # --- Sidebar panel /fertility-tracker ---
+    def _register_panel(_hass: HomeAssistant, _component: str) -> None:
         try:
-            hass.components.frontend.async_register_built_in_panel(
-                component_name="custom",  # use custom panel loader
+            _hass.components.frontend.async_register_built_in_panel(
+                component_name="custom",  # custom panel loader
                 sidebar_title="Fertility Tracker",
                 sidebar_icon="mdi:calendar-heart",
                 frontend_url_path="fertility-tracker",
@@ -248,10 +252,12 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             )
             _LOGGER.info("fertility_tracker: registered sidebar panel at /fertility-tracker")
         except Exception as exc:  # pragma: no cover
-            _LOGGER.warning("fertility_tracker: failed to register sidebar panel: %s", exc)
+            _LOGGER.debug("fertility_tracker: failed to register sidebar panel: %s", exc)
 
-    # Kick off the async registration task (don’t block setup)
-    hass.async_create_task(_ensure_frontend())
+    if "frontend" in hass.config.components:
+        _register_panel(hass, "frontend")
+    else:
+        async_when_setup(hass, "frontend", _register_panel)
 
     # WebSocket API registrations (voluptuous schemas)
     websocket_api.async_register_command(hass, ws_list_cycles)
