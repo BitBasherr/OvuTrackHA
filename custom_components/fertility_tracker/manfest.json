@@ -1,7 +1,6 @@
 {
   "domain": "fertility_tracker",
   "name": "Fertility Tracker",
-  "version": "1.0.0",
   "documentation": "https://github.com/BitBasherr/OvuTrackHA",
   "issue_tracker": "https://github.com/BitBasherr/OvuTrackHA/issues",
   "codeowners": ["@BitBasherr"],

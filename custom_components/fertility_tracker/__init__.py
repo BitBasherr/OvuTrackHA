@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Optional
+
+import voluptuous as vol
 
 from homeassistant.core import HomeAssistant, callback, ServiceCall
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers import event as hass_event
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.components.frontend import async_register_built_in_panel
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.components import websocket_api
@@ -38,7 +41,6 @@ from .const import (
 )
 from .helpers import (
     FertilityData,
-    CycleEvent,
     calculate_metrics_for_date,
     today_local,
     parse_time,
@@ -120,13 +122,13 @@ class EntryRuntime:
             for unsub in self._listeners:
                 try:
                     unsub()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
             self._listeners.clear()
 
         for ent_id in self.data.trigger_entities:
-            unsub = self.hass.helpers.event.async_track_state_change_event(
-                ent_id, self._trigger_entity_changed
+            unsub = async_track_state_change_event(
+                self.hass, ent_id, self._trigger_entity_changed
             )
             self._listeners.append(unsub)
 
@@ -137,7 +139,7 @@ class EntryRuntime:
         for unsub in self._listeners:
             try:
                 unsub()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         self._listeners.clear()
         await self.async_save()
@@ -162,7 +164,6 @@ class EntryRuntime:
 
         today = today_local(self.hass).date()
         if abs((metrics.next_period_date - today).days) <= 1:
-            # Check if a period event already logged covering around today
             already = any(
                 c.start <= today <= (c.end or c.start) for c in self.data.cycles
             )
@@ -186,9 +187,8 @@ class EntryRuntime:
             end_dt = now.replace(hour=end.hour, minute=end.minute, second=end.second, microsecond=0)
             if start_dt <= end_dt:
                 return start_dt <= now <= end_dt
-            # spans midnight
-            return now >= start_dt or now <= end_dt
-        except Exception:  # noqa: BLE001
+            return now >= start_dt or now <= end_dt  # spans midnight
+        except Exception:
             return False
 
     async def _notify_today_risk(self, reason: str) -> None:
@@ -229,7 +229,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         allow_directory=True,
     )
     assert isinstance(path, StaticPathConfig)
-    # Register custom panel
+
     async_register_built_in_panel(
         hass,
         component_name="custom",
@@ -244,21 +244,20 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         require_admin=False,
     )
 
-    # Websocket: expose CRUD for frontend
+    # WebSocket API registrations (now using voluptuous schemas)
     websocket_api.async_register_command(hass, ws_list_cycles)
     websocket_api.async_register_command(hass, ws_add_period)
     websocket_api.async_register_command(hass, ws_edit_cycle)
     websocket_api.async_register_command(hass, ws_delete_cycle)
     websocket_api.async_register_command(hass, ws_export_data)
 
-    # ---------- Domain services (for automations) ----------
+    # ---------- Domain services ----------
     async def _get_runtime_for_service(call: ServiceCall) -> EntryRuntime | None:
         entry_id = call.data.get("entry_id")
         runtime = None
         if entry_id and entry_id in hass.data.get(DOMAIN, {}):
             runtime = hass.data[DOMAIN][entry_id]
         else:
-            # If only a single entry exists, allow omitting entry_id for convenience
             entries = hass.data.get(DOMAIN, {})
             if len(entries) == 1:
                 runtime = list(entries.values())[0]
@@ -286,10 +285,8 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             if not ok:
                 _LOGGER.warning("cycle_id %s not found for period_end", cycle_id)
         else:
-            # set end for the most recent cycle if missing
             if runtime.data.cycles:
-                last = runtime.data.cycles[-1]
-                last.end = date
+                runtime.data.cycles[-1].end = date
         await runtime.async_save()
 
     async def _svc_log_sex(call: ServiceCall) -> None:
@@ -306,7 +303,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.services.async_register(DOMAIN, "log_period_start", _svc_log_period_start)
     hass.services.async_register(DOMAIN, "log_period_end", _svc_log_period_end)
     hass.services.async_register(DOMAIN, "log_sex", _svc_log_sex)
-    # ------------------------------------------------------
+    # ------------------------------------
 
     return True
 
@@ -338,28 +335,27 @@ def _get_runtime(hass: HomeAssistant, entry_id: str) -> EntryRuntime:
     return hass.data[DOMAIN][entry_id]
 
 
-# -------------------- WebSocket API for Panel --------------------
+# -------------------- WebSocket API (voluptuous schemas) --------------------
 
 @websocket_api.websocket_command(
     {
-        "type": "fertility_tracker/list_cycles",
-        "entry_id": str,
+        vol.Required("type"): "fertility_tracker/list_cycles",
+        vol.Required("entry_id"): str,
     }
 )
 @websocket_api.async_response
 async def ws_list_cycles(hass, connection, msg):
     runtime = _get_runtime(hass, msg["entry_id"])
-    payload = runtime.data.as_dict()
-    connection.send_result(msg["id"], payload)
+    connection.send_result(msg["id"], runtime.data.as_dict())
 
 
 @websocket_api.websocket_command(
     {
-        "type": "fertility_tracker/add_period",
-        "entry_id": str,
-        "start": str,
-        "end": str | None,
-        "notes": str | None,
+        vol.Required("type"): "fertility_tracker/add_period",
+        vol.Required("entry_id"): str,
+        vol.Required("start"): str,
+        vol.Optional("end"): str,
+        vol.Optional("notes"): str,
     }
 )
 @websocket_api.async_response
@@ -375,12 +371,12 @@ async def ws_add_period(hass, connection, msg):
 
 @websocket_api.websocket_command(
     {
-        "type": "fertility_tracker/edit_cycle",
-        "entry_id": str,
-        "cycle_id": str,
-        "start": str | None,
-        "end": str | None,
-        "notes": str | None,
+        vol.Required("type"): "fertility_tracker/edit_cycle",
+        vol.Required("entry_id"): str,
+        vol.Required("cycle_id"): str,
+        vol.Optional("start"): str,
+        vol.Optional("end"): str,
+        vol.Optional("notes"): str,
     }
 )
 @websocket_api.async_response
@@ -399,9 +395,9 @@ async def ws_edit_cycle(hass, connection, msg):
 
 @websocket_api.websocket_command(
     {
-        "type": "fertility_tracker/delete_cycle",
-        "entry_id": str,
-        "cycle_id": str,
+        vol.Required("type"): "fertility_tracker/delete_cycle",
+        vol.Required("entry_id"): str,
+        vol.Required("cycle_id"): str,
     }
 )
 @websocket_api.async_response
@@ -415,8 +411,8 @@ async def ws_delete_cycle(hass, connection, msg):
 
 @websocket_api.websocket_command(
     {
-        "type": "fertility_tracker/export_data",
-        "entry_id": str,
+        vol.Required("type"): "fertility_tracker/export_data",
+        vol.Required("entry_id"): str,
     }
 )
 @websocket_api.async_response
