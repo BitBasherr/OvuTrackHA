@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from typing import Iterable, Optional
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -13,7 +14,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.device_registry import DeviceEntryType
 
 from .const import DOMAIN
-from .helpers import calculate_metrics_for_date, today_local
+from .helpers import calculate_metrics_for_date, today_local, _get_local_tz
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
@@ -23,15 +24,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 class FertilityCalendar(CalendarEntity):
     _attr_has_entity_name = True
-    _attr_supported_features = CalendarEntityFeature.CREATE_EVENT
 
     def __init__(self, hass: HomeAssistant, entry_id: str, runtime) -> None:
         self.hass = hass
         self._runtime = runtime
         self._entry_id = entry_id
         self._attr_unique_id = f"{entry_id}_calendar"
-        # Only the entity part here; device name will prefix (e.g. "Wife Tracker Calendar")
-        self._attr_name = "Calendar"
+        self._attr_name = f"{runtime.data.name} Calendar"
+        self._attr_supported_features = CalendarEntityFeature.CREATE_EVENT
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -43,22 +43,14 @@ class FertilityCalendar(CalendarEntity):
             entry_type=DeviceEntryType.SERVICE,
         )
 
-    @property
-    def event(self):
-        # Optional: current/next event for state calculation.
-        # We return None; state will be "off" in most calendar cards.
-        return None
-
-    async def async_get_events(self, hass: HomeAssistant, start_date: dt.datetime, end_date: dt.datetime):
-        """Return events in range."""
+    async def async_get_events(self, hass, start_date: dt.datetime, end_date: dt.datetime):
+        tz = _get_local_tz(hass)
         events: list[CalendarEvent] = []
 
         # Logged periods
-        tz = hass.config.time_zone
         for c in self._runtime.data.cycles:
-            s = dt.datetime.combine(c.start, dt.time.min).replace(tzinfo=dt.timezone.utc).astimezone()
-            e_base = c.end or c.start
-            e = dt.datetime.combine(e_base, dt.time.max).replace(tzinfo=dt.timezone.utc).astimezone()
+            s = dt.datetime.combine(c.start, dt.time.min, tzinfo=tz)
+            e = dt.datetime.combine((c.end or c.start), dt.time.max, tzinfo=tz)
             if e < start_date or s > end_date:
                 continue
             events.append(
@@ -70,22 +62,17 @@ class FertilityCalendar(CalendarEntity):
                 )
             )
 
-        # Predicted windows around "today"
+        # Predicted windows computed daily
         metrics = calculate_metrics_for_date(self._runtime.data, today_local(self.hass))
-
-        def _localize_date(d: dt.date, at_hour: int = 12) -> dt.datetime:
-            return dt.datetime.combine(d, dt.time(at_hour, 0)).astimezone()
-
         if metrics.predicted_ovulation_date:
-            o = _localize_date(metrics.predicted_ovulation_date)
-            if start_date <= o <= end_date:
-                events.append(CalendarEvent(summary="Predicted Ovulation", start=o, end=o))
+            o = dt.datetime.combine(metrics.predicted_ovulation_date, dt.time(12, 0), tzinfo=tz)
+            events.append(CalendarEvent(summary="Predicted Ovulation", start=o, end=o))
 
         def _add_range(name: str, d1: dt.date | None, d2: dt.date | None):
             if not d1 or not d2:
                 return
-            s = _localize_date(d1, 0)
-            e = _localize_date(d2, 23)
+            s = dt.datetime.combine(d1, dt.time.min, tzinfo=tz)
+            e = dt.datetime.combine(d2, dt.time.max, tzinfo=tz)
             if e < start_date or s > end_date:
                 return
             events.append(CalendarEvent(summary=name, start=s, end=e))
@@ -96,7 +83,7 @@ class FertilityCalendar(CalendarEntity):
         return events
 
     async def async_create_event(self, **kwargs):
-        """Support quick-add via calendar panel: 'Period' all-day adds that day as a period."""
+        # Coming from calendar UI → add a period day (start=end)
         summary = kwargs.get("summary", "")
         start = kwargs["start"]
         end = kwargs.get("end", start)

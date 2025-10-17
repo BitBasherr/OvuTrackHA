@@ -17,10 +17,16 @@ from .const import (
 
 # ---------------- Utilities ----------------
 
+def _get_local_tz(hass: HomeAssistant) -> dt.tzinfo:
+    """Return a tzinfo for HA's configured timezone, even if it's stored as a string."""
+    tz = getattr(hass.config, "time_zone", None)
+    if isinstance(tz, dt.tzinfo):
+        return tz
+    return dt_util.get_time_zone(str(tz)) or dt_util.UTC
+
 def today_local(hass: HomeAssistant) -> dt.datetime:
     """Return timezone-aware 'now' in Home Assistant's configured timezone."""
-    tz = dt_util.get_time_zone(hass.config.time_zone)
-    return dt_util.now(tz)
+    return dt_util.now(_get_local_tz(hass))
 
 def parse_time(s: str | None) -> dt.time | None:
     if not s:
@@ -152,7 +158,8 @@ class FertilityData:
             daily_reminder_time=d.get("daily_reminder_time", "09:00:00"),
         )
         fd.cycles = [CycleEvent.from_dict(x) for x in d.get("cycles", [])]
-        fd.sex_events = [SexEvent.from_dict(x) for x in fd.sex_events or d.get("sex_events", [])]
+        # FIX: don't reference fd.sex_events during init
+        fd.sex_events = [SexEvent.from_dict(x) for x in d.get("sex_events", [])]
         fd.pregnancy_tests = [PregnancyTestEvent.from_dict(x) for x in d.get("pregnancy_tests", [])]
         fd.last_notified_date = d.get("last_notified_date")
         return fd
