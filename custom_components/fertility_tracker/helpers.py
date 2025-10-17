@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import datetime as dt
-import math
 import uuid
 from dataclasses import dataclass, field
 from statistics import mean, pstdev
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
@@ -18,14 +17,10 @@ from .const import (
 
 # ---------------- Utilities ----------------
 
-def _local_tz(hass: HomeAssistant) -> dt.tzinfo:
-    """Return a tzinfo for HA's configured timezone."""
-    return dt_util.get_time_zone(hass.config.time_zone) or dt_util.DEFAULT_TIME_ZONE
-
 def today_local(hass: HomeAssistant) -> dt.datetime:
-    """Timezone-aware 'now' in HA local timezone."""
-    # dt_util.now() accepts a tz; returns aware datetime
-    return dt_util.now(_local_tz(hass))
+    """Return timezone-aware 'now' in Home Assistant's configured timezone."""
+    tz = dt_util.get_time_zone(hass.config.time_zone)
+    return dt_util.now(tz)
 
 def parse_time(s: str | None) -> dt.time | None:
     if not s:
@@ -157,7 +152,7 @@ class FertilityData:
             daily_reminder_time=d.get("daily_reminder_time", "09:00:00"),
         )
         fd.cycles = [CycleEvent.from_dict(x) for x in d.get("cycles", [])]
-        fd.sex_events = [SexEvent.from_dict(x) for x in d.get("sex_events", [])]
+        fd.sex_events = [SexEvent.from_dict(x) for x in fd.sex_events or d.get("sex_events", [])]
         fd.pregnancy_tests = [PregnancyTestEvent.from_dict(x) for x in d.get("pregnancy_tests", [])]
         fd.last_notified_date = d.get("last_notified_date")
         return fd
@@ -208,8 +203,7 @@ def _completed_cycle_lengths(cycles: list[CycleEvent]) -> list[int]:
     for i in range(1, len(cycles)):
         prev = cycles[i - 1]
         cur = cycles[i]
-        # cycle length = days between period starts
-        lens.append((cur.start - prev.start).days)
+        lens.append((cur.start - prev.start).days)  # diff between period starts
     return lens
 
 
@@ -240,7 +234,6 @@ def calculate_metrics_for_date(data: FertilityData, when: dt.datetime) -> Metric
     std_len = _std(lengths)
 
     last_start = cycles[-1].start if cycles else None
-    last_end = cycles[-1].end if cycles and cycles[-1].end else None
 
     cycle_day = None
     if last_start:
