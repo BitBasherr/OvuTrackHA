@@ -65,13 +65,21 @@
 
     async _bootstrap() {
       this._entryId = this._config.entry_id || null;
-      // Auto-pick first fertility_tracker entry if not provided
+
+      // Prefer our lightweight domain WS first; fall back to core list.
       if (!this._entryId) {
         try {
-          const entries = await this._hass.callWS({ type: "config_entries/get_entries" });
-          const match = entries.find((e) => e.domain === "fertility_tracker");
-          if (match) this._entryId = match.entry_id;
-        } catch (e) {}
+          const res = await this._hass.callWS({ type: "fertility_tracker/list_entries" });
+          const ents = res?.entries || [];
+          if (ents.length) this._entryId = ents[0].entry_id;
+        } catch (e) {
+          // fallback
+          try {
+            const entries = await this._hass.callWS({ type: "config_entries/get_entries" });
+            const match = entries.find((e) => e.domain === "fertility_tracker");
+            if (match) this._entryId = match.entry_id;
+          } catch (_e) {}
+        }
       }
       await this._refresh();
     }
@@ -102,16 +110,19 @@
       await this._hass.callWS({
         type: "fertility_tracker/add_period",
         entry_id: this._entryId,
-        start, end, notes,
+        start,
+        ...(end ? { end } : {}),
+        ...(notes ? { notes } : {}),
       });
       await this._refresh();
     }
 
     async _editCycle(cycleId, start, end, notes) {
+      if (!this._entryId || !cycleId) return;
       await this._hass.callWS({
         type: "fertility_tracker/edit_cycle",
         entry_id: this._entryId,
-        cycle_id: cycleId,
+        cycle_id: cycleId,              // <-- backend expects cycle_id
         ...(start ? { start } : {}),
         ...(end ? { end } : {}),
         ...(notes != null ? { notes } : {}),
@@ -120,11 +131,12 @@
     }
 
     async _deleteCycle(cycleId) {
+      if (!this._entryId || !cycleId) return;
       if (!confirm("Delete this cycle?")) return;
       await this._hass.callWS({
         type: "fertility_tracker/delete_cycle",
         entry_id: this._entryId,
-        cycle_id: cycleId,
+        cycle_id: cycleId,              // <-- backend expects cycle_id
       });
       await this._refresh();
     }
@@ -151,12 +163,12 @@
     async _presetEndLastToday() {
       const last = this._lastCycle();
       if (!last) return;
-      await this._editCycle(last.id, null, todayLocalYMD(), last.notes || "");
+      await this._editCycle(last.cycle_id, null, todayLocalYMD(), last.notes || "");
     }
     async _presetShiftLastStart(delta) {
       const last = this._lastCycle();
       if (!last || !last.start) return;
-      await this._editCycle(last.id, ymdShift(last.start, delta), last.end || null, last.notes || "");
+      await this._editCycle(last.cycle_id, ymdShift(last.start, delta), last.end || null, last.notes || "");
     }
     _lastCycle() {
       const c = this._data?.cycles || [];
@@ -228,8 +240,9 @@
         const start = c.start || "";
         const end = c.end || "";
         const notes = c.notes || "";
+        const cid = c.cycle_id || c.id || "";  // tolerate both, prefer cycle_id
         rows += `
-          <tr data-id="${c.id}">
+          <tr data-cid="${cid}">
             <td><input type="date" class="ft-start" value="${start}"></td>
             <td><input type="date" class="ft-end" value="${end}"></td>
             <td><input type="text" class="ft-notes" value="${notes}"></td>
@@ -273,16 +286,16 @@
         this._root.querySelector("#ft-sex-note").value = "";
       });
 
-      this._root.querySelectorAll("tr[data-id]").forEach((row) => {
-        const id = row.getAttribute("data-id");
+      this._root.querySelectorAll("tr[data-cid]").forEach((row) => {
+        const cid = row.getAttribute("data-cid");
         row.querySelector(".ft-save")?.addEventListener("click", async () => {
           const start = row.querySelector(".ft-start").value || null;
           const end = row.querySelector(".ft-end").value || null;
           const notes = row.querySelector(".ft-notes").value ?? null;
-          await this._editCycle(id, start || null, end || null, notes ?? null);
+          await this._editCycle(cid, start || null, end || null, notes ?? null);
         });
         row.querySelector(".ft-del")?.addEventListener("click", async () => {
-          await this._deleteCycle(id);
+          await this._deleteCycle(cid);
         });
       });
     }
@@ -290,7 +303,7 @@
 
   customElements.define("fertility-tracker-card", FertilityTrackerCard);
 
-  // So it shows up in “+ Add Card → By URL”
+  // Show in the card picker
   window.customCards = window.customCards || [];
   window.customCards.push({
     type: "fertility-tracker-card",
