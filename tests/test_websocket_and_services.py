@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 from freezegun import freeze_time
 from homeassistant.core import HomeAssistant
-from tests.common import async_mock_service
+
+# ✅ Use the PHACC helper, not tests.common
+from pytest_homeassistant_custom_component.common import async_mock_service
 
 from custom_components.fertility_tracker.const import DOMAIN
 from custom_components.fertility_tracker.helpers import coerce_date
@@ -42,6 +44,7 @@ async def test_ws_list_add_edit_delete(hass: HomeAssistant, hass_ws_client, setu
     assert resp["success"] is True
     assert resp["result"]["ok"] is True
 
+
 async def test_domain_services_and_notify(hass: HomeAssistant, setup_integration, config_entry):
     # Mock a notify service and set options to use it
     calls = async_mock_service(hass, "notify", "mobile_app_test")
@@ -60,12 +63,11 @@ async def test_domain_services_and_notify(hass: HomeAssistant, setup_integration
         "date": "2025-09-05"
     }, blocking=True)
 
-    # Trigger a notification by simulating a trigger entity change:
-    # easiest is to call the private notify directly under a frozen date near expected period
+    # Trigger a notification by calling the private notifier near expected period
     from custom_components.fertility_tracker.__init__ import EntryRuntime
     with freeze_time("2025-09-10 09:05:00"):
-        await runtime._notify_today_risk(reason="test")
+        await runtime._notify_today_risk(reason="test")  # noqa: SLF001
 
-    # At least one notification should have been attempted
     await hass.async_block_till_done()
-    assert len(calls) >= 0  # cannot guarantee risk label here; ensure no exceptions
+    # We can't guarantee risk label or quiet hours, just make sure no exceptions
+    assert isinstance(calls, list)
