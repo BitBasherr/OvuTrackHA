@@ -1,126 +1,140 @@
 from __future__ import annotations
 
 import datetime as dt
+from typing import Iterable, List
 
+from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.components.calendar import (
-    CalendarEntity,
-    CalendarEvent,
-    CalendarEntityFeature,
-)
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.device_registry import DeviceEntryType
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
-from .helpers import calculate_metrics_for_date, today_local, _get_local_tz
+from .helpers import calculate_metrics_for_date, today_local, coerce_date
 
+# Helper to normalize timezones for calendar events
+def _ensure_aware(d: dt.datetime, hass: HomeAssistant) -> dt.datetime:
+    """Return timezone-aware datetime in HA's local tz."""
+    if dt_util.is_naive(d):
+        return dt_util.as_local(d.replace(tzinfo=dt_util.get_time_zone(hass.config.time_zone)))
+    # Convert any tz to HA local
+    return dt_util.as_local(d)
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
+def _start_of_local_day(day: dt.date, hass: HomeAssistant) -> dt.datetime:
+    tz = dt_util.get_time_zone(hass.config.time_zone)
+    return dt.datetime.combine(day, dt.time.min, tzinfo=tz)
+
+def _end_exclusive_of_local_day(day: dt.date, hass: HomeAssistant) -> dt.datetime:
+    # End is exclusive, so use next midnight
+    return _start_of_local_day(day + dt.timedelta(days=1), hass)
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
     runtime = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([FertilityCalendar(hass, entry.entry_id, runtime)])
+    async_add_entities([FertilityCalendar(hass, entry, runtime)])
 
 
 class FertilityCalendar(CalendarEntity):
-    """Calendar that exposes logged periods and predicted windows."""
+    """Calendar showing logged periods & predicted windows."""
 
     _attr_has_entity_name = True
-    _attr_supported_features = CalendarEntityFeature.CREATE_EVENT
+    # Keep the entity simple; device name will prefix this automatically
+    _attr_name = "Calendar"
+    _attr_icon = "mdi:calendar-heart"
+    _attr_event: CalendarEvent | None = None  # storage for current/next event
 
-    def __init__(self, hass: HomeAssistant, entry_id: str, runtime) -> None:
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, runtime) -> None:
         self.hass = hass
+        self._entry = entry
         self._runtime = runtime
-        self._entry_id = entry_id
-        self._attr_unique_id = f"{entry_id}_calendar"
-        # Entity name (device name is added automatically when has_entity_name=True)
-        self._attr_name = f"{runtime.data.name} Calendar"
+        self._attr_unique_id = f"{entry.entry_id}_calendar"
 
     @property
     def device_info(self) -> DeviceInfo:
         return DeviceInfo(
-            identifiers={(DOMAIN, self._entry_id)},
-            name=self._runtime.data.name,
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=self._runtime.data.name,  # e.g. "Wife Tracker"
             manufacturer="Custom",
             model="Fertility Tracker",
             entry_type=DeviceEntryType.SERVICE,
         )
 
-    # --- Important: HA calls self.event when computing state; return None to avoid NotImplementedError
+    # === Required by CalendarEntity ===
     @property
-    def event(self) -> CalendarEvent | None:  # type: ignore[override]
-        return None
+    def event(self) -> CalendarEvent | None:
+        """Return a single 'current/next' event for state. It's OK to be None."""
+        return self._attr_event
 
-    # --- Also safe: override state so HA won't try to infer it from self.event
-    @property
-    def state(self) -> str | None:
-        # We don't maintain a "next/upcoming" event; advertise as "off".
-        return "off"
+    async def async_update(self) -> None:
+        """Optionally set a current/next event for state; safe to leave None."""
+        # We'll set the next upcoming event in the next 60 days (if any),
+        # but leaving this as None is fine—HA will treat the calendar as 'off'.
+        now = today_local(self.hass)
+        future = now + dt.timedelta(days=60)
+        events = await self.async_get_events(self.hass, now, future)
+        self._attr_event = next((e for e in sorted(events, key=lambda e: e.start) if e.start >= now), None)
 
+    # === API used by HA UI to fetch ranges ===
     async def async_get_events(
         self,
         hass: HomeAssistant,
         start_date: dt.datetime,
         end_date: dt.datetime,
-    ):
-        tz = _get_local_tz(hass)
+    ) -> List[CalendarEvent]:
+        """Return events between start_date (inclusive) and end_date (exclusive)."""
+        # Normalize to local tz & strip weird tzinfo inputs
+        tz = dt_util.get_time_zone(hass.config.time_zone)
+        if isinstance(start_date.tzinfo, str) or dt_util.is_naive(start_date):
+            start_date = start_date.replace(tzinfo=tz)
+        if isinstance(end_date.tzinfo, str) or dt_util.is_naive(end_date):
+            end_date = end_date.replace(tzinfo=tz)
+
         events: list[CalendarEvent] = []
 
-        # Logged period ranges
+        # 1) Logged periods (from data.cycles)
         for c in self._runtime.data.cycles:
-            s = dt.datetime.combine(c.start, dt.time.min, tzinfo=tz)
-            e = dt.datetime.combine((c.end or c.start), dt.time.max, tzinfo=tz)
-            if e < start_date or s > end_date:
+            # Start day is known; if end is None, treat as a 1-day placeholder window
+            start = _start_of_local_day(c.start, hass)
+            if c.end:
+                end = _end_exclusive_of_local_day(c.end, hass)
+            else:
+                end = _end_exclusive_of_local_day(c.start, hass)
+
+            if end <= start_date or start >= end_date:
                 continue
+
             events.append(
                 CalendarEvent(
                     summary="Period",
-                    start=s,
-                    end=e,
+                    start=start,
+                    end=end,
                     description=c.notes or "",
+                    location=None,
                 )
             )
 
-        # Predicted windows (based on current metrics)
-        metrics = calculate_metrics_for_date(self._runtime.data, today_local(self.hass))
+        # 2) Predicted windows, based on current metrics (today-local snapshot)
+        metrics = calculate_metrics_for_date(self._runtime.data, today_local(hass))
 
-        def _add_range(name: str, d1: dt.date | None, d2: dt.date | None):
-            if not d1 or not d2:
+        def _maybe_add_range(summary: str, start_day: dt.date | None, end_day: dt.date | None) -> None:
+            if not start_day or not end_day:
                 return
-            s = dt.datetime.combine(d1, dt.time.min, tzinfo=tz)
-            e = dt.datetime.combine(d2, dt.time.max, tzinfo=tz)
-            if e < start_date or s > end_date:
+            start_dt = _start_of_local_day(start_day, hass)
+            # end_day is inclusive by domain logic; calendar end should be exclusive
+            end_dt = _end_exclusive_of_local_day(end_day, hass)
+            if end_dt <= start_date or start_dt >= end_date:
                 return
-            events.append(CalendarEvent(summary=name, start=s, end=e))
+            events.append(
+                CalendarEvent(
+                    summary=summary,
+                    start=start_dt,
+                    end=end_dt,
+                    description="Predicted",
+                    location=None,
+                )
+            )
 
-        _add_range("Fertile Window", metrics.fertile_window_start, metrics.fertile_window_end)
-        _add_range(
-            "Implantation Window",
-            metrics.implantation_window_start,
-            metrics.implantation_window_end,
-        )
-
-        # Optional: show ovulation as a one-day point event
-        if metrics.predicted_ovulation_date:
-            o = dt.datetime.combine(metrics.predicted_ovulation_date, dt.time(12, 0), tzinfo=tz)
-            events.append(CalendarEvent(summary="Predicted Ovulation", start=o, end=o))
+        _maybe_add_range("Fertile Window", metrics.fertile_window_start, metrics.fertile_window_end)
+        _maybe_add_range("Implantation Window", metrics.implantation_window_start, metrics.implantation_window_end)
 
         return events
-
-    async def async_create_event(self, **kwargs):
-        """Support adding a 'Period' day via the calendar UI (optional nicety)."""
-        summary = kwargs.get("summary", "") or ""
-        start = kwargs.get("start")
-        end = kwargs.get("end", start)
-
-        # Handle calendar panel payloads: {"date": "YYYY-MM-DD"} etc.
-        if isinstance(start, dict) and "date" in start:
-            start = dt.datetime.fromisoformat(start["date"] + "T00:00:00")
-        if isinstance(end, dict) and "date" in end:
-            end = dt.datetime.fromisoformat(end["date"] + "T00:00:00")
-
-        if isinstance(start, dt.datetime) and isinstance(end, dt.datetime):
-            sdate = start.date()
-            edate = end.date()
-            if "period" in summary.lower():
-                self._runtime.data.add_period(start=sdate, end=edate, notes="Added via calendar")
-                await self._runtime.async_save()
