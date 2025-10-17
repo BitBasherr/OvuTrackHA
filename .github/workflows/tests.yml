@@ -15,12 +15,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          # ✅ Enables automatic pip cache keyed by the files below
+          cache: "pip"
+          cache-dependency-path: |
+            requirements_test.txt
+            pyproject.toml
+            setup.cfg
+            setup.py
 
       - name: Install test requirements
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+          PIP_NO_PYTHON_VERSION_WARNING: "1"
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements_test.txt
+          pip install -r requirements_test.txt --upgrade --upgrade-strategy only-if-needed
 
       - name: Run tests
-        run: |
-          pytest --maxfail=1 --durations=20
+        run: pytest --maxfail=1 --durations=20

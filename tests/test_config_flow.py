@@ -3,12 +3,11 @@ from __future__ import annotations
 import pytest
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
-from homeassistant.const import CONF_NAME
-
 from custom_components.fertility_tracker.const import DOMAIN
 
 pytestmark = pytest.mark.asyncio
 
+@pytest.mark.usefixtures("enable_custom_integrations")
 async def test_user_flow_creates_entry(hass: HomeAssistant):
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}

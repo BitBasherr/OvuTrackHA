@@ -7,9 +7,11 @@ from homeassistant.const import CONF_NAME
 
 from custom_components.fertility_tracker.const import DOMAIN
 
-# ✅ Enable loading from ./custom_components during tests
+# ✅ Critical: expose ./custom_components to Home Assistant during tests
 @pytest.fixture(autouse=True)
-def auto_enable_custom_integrations(enable_custom_integrations):
+def _enable_custom_integrations(enable_custom_integrations):
+    # The fixture from PHACC patches Home Assistant loader to discover
+    # integrations under the repo's ./custom_components directory.
     yield
 
 @pytest.fixture
@@ -17,7 +19,7 @@ def config_entry(hass: HomeAssistant) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_NAME: "Wife Tracker"},
-        options={},  # options flow tests will populate
+        options={},
         title="Wife Tracker",
     )
     entry.add_to_hass(hass)
