@@ -12,6 +12,49 @@ from custom_components.fertility_tracker.const import DOMAIN
 pytestmark = pytest.mark.asyncio
 
 
+async def _close_ws_and_http(hass: HomeAssistant, client) -> None:
+    """Best-effort cleanup to satisfy PHACC's strict teardown."""
+    # Close WS client and any attached sessions/clients
+    for attr in ("close", "async_close"):
+        fn = getattr(client, attr, None)
+        if callable(fn):
+            try:
+                res = fn()
+                if hasattr(res, "__await__"):
+                    await res
+            except Exception:
+                pass
+
+    # aiohttp test client internals (defensive)
+    for attr in ("client", "session", "client_session"):
+        obj = getattr(client, attr, None)
+        if obj:
+            for closer in ("close", "aclose", "shutdown"):
+                fn = getattr(obj, closer, None)
+                if callable(fn):
+                    try:
+                        res = fn()
+                        if hasattr(res, "__await__"):
+                            await res
+                    except Exception:
+                        pass
+
+    # Try to stop HA HTTP server if present (names vary across versions)
+    http = getattr(hass, "http", None)
+    if http:
+        for closer in ("async_stop", "stop"):
+            fn = getattr(http, closer, None)
+            if callable(fn):
+                try:
+                    res = fn()
+                    if hasattr(res, "__await__"):
+                        await res
+                except Exception:
+                    pass
+
+    await hass.async_block_till_done()
+
+
 async def test_ws_list_add_edit_delete(hass: HomeAssistant, hass_ws_client, setup_integration, config_entry):
     client = await hass_ws_client(hass)
     try:
@@ -72,9 +115,7 @@ async def test_ws_list_add_edit_delete(hass: HomeAssistant, hass_ws_client, setu
         assert resp["success"] is True
         assert resp["result"]["ok"] is True
     finally:
-        # 🔐 Important: close the WS client so teardown finds no lingering threads
-        await client.close()
-        await hass.async_block_till_done()
+        await _close_ws_and_http(hass, client)
 
 
 async def test_domain_services_and_notify(hass: HomeAssistant, setup_integration, config_entry):
