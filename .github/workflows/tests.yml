@@ -4,25 +4,33 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   tests:
     runs-on: ubuntu-latest
     env:
-      # ✅ Point PHACC at your repo's custom_components
+      # Let PHACC discover your custom integration
       PYTEST_HOMEASSISTANT_CUSTOM_COMPONENTS: ${{ github.workspace }}/custom_components
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python (with pip cache)
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
           cache-dependency-path: |
             requirements_test.txt
-            pyproject.toml
+
+      - name: Install test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements_test.txt
 
       - name: Sanity - show tree
         run: |
@@ -36,26 +44,6 @@ jobs:
           if p.exists():
               print("manifest:", json.loads(p.read_text()))
           PY
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-            path: ~/.cache/pip
-            key: ${{ runner.os }}-pip-${{ hashFiles('requirements*.txt') }}
-            restore-keys: |
-              ${{ runner.os }}-pip-
-
-      - name: Install test deps
-        run: |
-            python -m pip install --upgrade pip
-            pip install -r requirements_test.txt
-
-      - name: Install test requirements
-        env:
-          PIP_DISABLE_PIP_VERSION_CHECK: "1"
-          PIP_NO_PYTHON_VERSION_WARNING: "1"
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements_test.txt --upgrade-strategy only-if-needed
 
       - name: Run pytest
-        run: pytest --maxfail=1 --durations=20
+        run: pytest --maxfail=1 --durations=20 -q

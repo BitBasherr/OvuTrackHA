@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
@@ -18,17 +19,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class FertilityRiskSensor(SensorEntity):
-    """Textual risk summary sensor."""
+    """Compact fertility risk sensor with verbose text attribute."""
 
     _attr_has_entity_name = True
     _attr_icon = "mdi:heart-pulse"
-    _attr_native_value = None
+    _attr_native_value: str | None = None
 
     def __init__(self, hass: HomeAssistant, entry_id: str, runtime) -> None:
         self.hass = hass
         self._runtime = runtime
         self._entry_id = entry_id
-        # Entity name is just the entity portion, device name will be prefixed automatically
         self._attr_name = "Fertility Risk"
         self._attr_unique_id = f"{entry_id}_fertility_risk"
 
@@ -42,11 +42,47 @@ class FertilityRiskSensor(SensorEntity):
             entry_type=DeviceEntryType.SERVICE,
         )
 
+    def _classify_level_from_windows(self, metrics) -> str:
+        """Return 'low' | 'medium' | 'high' based on date windows."""
+        today = today_local(self.hass).date()
+
+        # High if within implantation window
+        if metrics.implantation_window_start and metrics.implantation_window_end:
+            if metrics.implantation_window_start <= today <= metrics.implantation_window_end:
+                return "high"
+
+        # High if within fertile window
+        if metrics.fertile_window_start and metrics.fertile_window_end:
+            if metrics.fertile_window_start <= today <= metrics.fertile_window_end:
+                return "high"
+            # Medium if within ±2 days of fertile window
+            before = metrics.fertile_window_start - dt.timedelta(days=2)
+            after = metrics.fertile_window_end + dt.timedelta(days=2)
+            if before <= today <= after:
+                return "medium"
+
+        # Default fallback
+        return "low"
+
     async def async_update(self) -> None:
         metrics = calculate_metrics_for_date(self._runtime.data, today_local(self.hass))
-        self._attr_native_value = metrics.risk_label or "Unknown"
-        # Expose additional attrs for UI/debug
+
+        # Compact state
+        level = self._classify_level_from_windows(metrics)
+        self._attr_native_value = level
+
+        # Long, user-friendly text (keep your existing phrasing if available)
+        risk_text = metrics.risk_label
+        if not risk_text:
+            risk_text = {
+                "high": "High pregnancy risk today (fertile/implantation window).",
+                "medium": "Medium pregnancy risk today (near fertile window).",
+                "low": "Safe to have unprotected sex today (low pregnancy risk).",
+            }[level]
+
+        # Extra attributes for UI/debugging
         self._attr_extra_state_attributes = {
+            "risk_text": risk_text,
             "cycle_day": metrics.cycle_day,
             "cycle_length_avg": metrics.cycle_length_avg,
             "cycle_length_std": metrics.cycle_length_std,
