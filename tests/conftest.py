@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
-
 from homeassistant.core import HomeAssistant
 from homeassistant.const import CONF_NAME
 
-DOMAIN = "fertility_tracker"
+from custom_components.fertility_tracker.const import DOMAIN
+
+# ✅ Enable loading from ./custom_components during tests
+@pytest.fixture(autouse=True)
+def auto_enable_custom_integrations(enable_custom_integrations):
+    yield
 
 @pytest.fixture
 def config_entry(hass: HomeAssistant) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_NAME: "Wife Tracker"},
-        options={},  # use defaults; options flow tests will set them
+        options={},  # options flow tests will populate
         title="Wife Tracker",
     )
     entry.add_to_hass(hass)
