@@ -12,9 +12,19 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers import event as hass_event
 from homeassistant.helpers.event import async_track_state_change_event
-from homeassistant.components.frontend import async_register_built_in_panel
-from homeassistant.components.http import StaticPathConfig
 from homeassistant.components import websocket_api
+
+# NOTE: We import these types, but we only USE them if the component is loaded.
+#       See guarded UI setup in async_setup().
+try:
+    from homeassistant.components.frontend import async_register_built_in_panel
+except Exception:  # pragma: no cover - import is safe; we guard usage
+    async_register_built_in_panel = None  # type: ignore[assignment]
+
+try:
+    from homeassistant.components.http import StaticPathConfig
+except Exception:  # pragma: no cover
+    StaticPathConfig = object  # type: ignore[assignment]
 
 from .const import (
     DOMAIN,
@@ -219,32 +229,47 @@ class EntryRuntime:
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    # Serve static frontend (panel)
-    path = hass.http.register_static_path(
-        "/fertility_tracker_frontend",
-        hass.config.path("custom_components/fertility_tracker/frontend"),
-        cache_headers=True,
-        require_auth=True,
-        name="Fertility Tracker Frontend",
-        allow_directory=True,
-    )
-    assert isinstance(path, StaticPathConfig)
+    """Set up global UI bits if the relevant core integrations are present."""
+    # Serve static frontend (panel) ONLY if HTTP is loaded
+    if getattr(hass, "http", None) is not None:
+        try:
+            path = hass.http.register_static_path(
+                "/fertility_tracker_frontend",
+                hass.config.path("custom_components/fertility_tracker/frontend"),
+                cache_headers=True,
+                require_auth=True,
+                name="Fertility Tracker Frontend",
+                allow_directory=True,
+            )
+            # Keep the type reference for type-checkers; at runtime this is fine.
+            assert isinstance(path, StaticPathConfig) or isinstance(path, object)
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.debug("HTTP not ready; skipping static path registration: %s", exc)
+    else:
+        _LOGGER.debug("HTTP not loaded; skipping static path registration")
 
-    async_register_built_in_panel(
-        hass,
-        component_name="custom",
-        sidebar_title="Fertility Tracker",
-        sidebar_icon="mdi:calendar-heart",
-        frontend_url_path="fertility-tracker",
-        config={
-            "module_url": "/fertility_tracker_frontend/panel.js",
-            "embed_iframe": False,
-            "trust_external": False,
-        },
-        require_admin=False,
-    )
+    # Register sidebar panel ONLY if frontend is loaded
+    if "frontend" in hass.config.components and async_register_built_in_panel:
+        try:
+            async_register_built_in_panel(
+                hass,
+                component_name="custom",
+                sidebar_title="Fertility Tracker",
+                sidebar_icon="mdi:calendar-heart",
+                frontend_url_path="fertility-tracker",
+                config={
+                    "module_url": "/fertility_tracker_frontend/panel.js",
+                    "embed_iframe": False,
+                    "trust_external": False,
+                },
+                require_admin=False,
+            )
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.debug("Frontend not ready; skipping panel registration: %s", exc)
+    else:
+        _LOGGER.debug("Frontend not loaded; skipping panel registration")
 
-    # WebSocket API registrations (now using voluptuous schemas)
+    # WebSocket API registrations (voluptuous schemas)
     websocket_api.async_register_command(hass, ws_list_cycles)
     websocket_api.async_register_command(hass, ws_add_period)
     websocket_api.async_register_command(hass, ws_edit_cycle)
