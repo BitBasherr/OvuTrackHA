@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import inspect
 from typing import Optional, Callable, Any, Dict
 
 import voluptuous as vol
@@ -15,7 +16,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.components import websocket_api
 from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
-from homeassistant.helpers import discovery as hass_discovery
+from homeassistant.setup import async_when_setup  # ✅ correct place
 
 from .const import (
     DOMAIN,
@@ -51,7 +52,6 @@ from .helpers import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Required when async_setup exists
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
@@ -229,42 +229,54 @@ class EntryRuntime:
                 domain,
                 service,
                 {"title": title, "message": message},
-                blocking=True,  # deterministic in tests
+                blocking=True,
             )
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up global bits (static path + custom panel) and WS API."""
+    """Set up static path, sidebar panel, and WS API."""
 
-    # ---- static path: /fertility_tracker_frontend/*  ----
+    # ---------- static path: /fertility_tracker_frontend/* ----------
     async def _register_static(_hass: HomeAssistant, _component: str) -> None:
         http = getattr(_hass, "http", None)
         if http is None:
             _LOGGER.debug("HTTP not loaded; cannot register static path")
             return
+        path = _hass.config.path("custom_components/fertility_tracker/frontend")
         try:
             http.register_static_path(
                 "/fertility_tracker_frontend",
-                _hass.config.path("custom_components/fertility_tracker/frontend"),
+                path,
                 cache_headers=True,
                 require_auth=True,
                 name="Fertility Tracker Frontend",
                 allow_directory=True,
             )
-            _LOGGER.debug("Static path registered at /fertility_tracker_frontend")
-        except Exception as exc:  # pragma: no cover
-            _LOGGER.debug("Failed to register static path: %s", exc)
+        except TypeError:
+            # older cores without allow_directory
+            http.register_static_path(
+                "/fertility_tracker_frontend",
+                path,
+                cache_headers=True,
+                require_auth=True,
+                name="Fertility Tracker Frontend",
+            )
+        _LOGGER.debug("Static path registered at /fertility_tracker_frontend")
 
     if getattr(hass, "http", None) is not None:
         await _register_static(hass, "http")
     else:
-        hass_discovery.async_when_setup(hass, "http", _register_static)
+        async_when_setup(hass, "http", _register_static)
 
-    # ---- sidebar panel: /fertility-tracker  ----
+    # ---------- sidebar panel: /fertility-tracker ----------
     async def _register_panel(_hass: HomeAssistant, _component: str) -> None:
+        # remove if exists (handle both sync/async variants)
         try:
-            # remove if exists to avoid duplicates after reloads
-            await _hass.components.frontend.async_remove_panel("fertility-tracker")
+            rm = _hass.components.frontend.async_remove_panel
+            if inspect.iscoroutinefunction(rm):
+                await rm("fertility-tracker")
+            else:
+                rm("fertility-tracker")
         except Exception:
             pass
 
@@ -290,9 +302,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     if "frontend" in hass.config.components:
         await _register_panel(hass, "frontend")
     else:
-        hass_discovery.async_when_setup(hass, "frontend", _register_panel)
+        async_when_setup(hass, "frontend", _register_panel)
 
-    # ---- WebSocket API registrations ----
+    # ---------- WebSocket API ----------
     websocket_api.async_register_command(hass, ws_discover_entry)
     websocket_api.async_register_command(hass, ws_list_cycles)
     websocket_api.async_register_command(hass, ws_add_period)
@@ -300,7 +312,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     websocket_api.async_register_command(hass, ws_delete_cycle)
     websocket_api.async_register_command(hass, ws_export_data)
 
-    # ---- Domain services ----
+    # ---------- Domain services ----------
     async def _get_runtime_for_service(call: ServiceCall) -> EntryRuntime | None:
         entry_id = call.data.get("entry_id")
         runtime = None
@@ -388,7 +400,7 @@ def _get_runtime(hass: HomeAssistant, entry_id: str) -> EntryRuntime:
     return hass.data[DOMAIN][entry_id]
 
 
-# -------------------- WebSocket API --------------------
+# ==================== WebSocket API ====================
 
 @websocket_api.websocket_command(
     {vol.Required("type"): "fertility_tracker/discover_entry"}
