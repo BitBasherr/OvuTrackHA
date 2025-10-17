@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from typing import Optional
+from typing import Optional, Callable
 
 import voluptuous as vol
 
@@ -14,6 +14,7 @@ from homeassistant.helpers import event as hass_event
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.components import websocket_api
 from homeassistant.helpers import config_validation as cv
+from homeassistant.util import dt as dt_util  # ✅ use HA's timezone helpers
 
 from .const import (
     DOMAIN,
@@ -84,8 +85,8 @@ class EntryRuntime:
             pregnancy_tests=[],
             last_notified_date=None,
         )
-        self._listeners: list[callable] = []
-        self._timer_unsub: Optional[callable] = None
+        self._listeners: list[Callable[[], None]] = []
+        self._timer_unsub: Optional[Callable[[], None]] = None
 
     async def async_load(self) -> None:
         saved = await self.store.async_load()
@@ -194,17 +195,24 @@ class EntryRuntime:
             return False
 
     async def _notify_today_risk(self, reason: str) -> None:
-        now = dt.datetime.now(self.hass.config.time_zone)
+        """Notify today's risk using a real tzinfo (fixes freezegun/HA tests)."""
+        # ✅ get a tzinfo object (not a string) and use dt_util.now(tz)
+        tz = dt_util.get_time_zone(self.hass.config.time_zone)
+        now = dt_util.now(tz)
+
         if self._quiet_hours(now):
             return
         if self.data.last_notified_date == now.date().isoformat():
             return
+
         metrics = calculate_metrics_for_date(self.data, now)
         if metrics.risk_label:
             await self._send_notifications(
                 title=f"{self.data.name}: Today's fertility risk",
-                message=f"{metrics.risk_label} (triggered by {reason}). "
-                        f"Cycle day {metrics.cycle_day}. Ovulation ~ {metrics.predicted_ovulation_date}."
+                message=(
+                    f"{metrics.risk_label} (triggered by {reason}). "
+                    f"Cycle day {metrics.cycle_day}. Ovulation ~ {metrics.predicted_ovulation_date}."
+                ),
             )
             self.data.last_notified_date = now.date().isoformat()
             await self.async_save()
@@ -216,7 +224,7 @@ class EntryRuntime:
             except ValueError:
                 domain, service = "notify", svc
             await self.hass.services.async_call(
-                domain, service, {"title": title, "message": message}, blocking=False
+                domain, service, {"title": title, "message": message}, blocking=True  # more deterministic in tests
             )
 
 
@@ -242,8 +250,8 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     # Register sidebar panel ONLY if frontend is loaded
     if "frontend" in hass.config.components:
         try:
+            # Signature is (component_name, ...); we keep this in a guard anyway.
             hass.components.frontend.async_register_built_in_panel(
-                hass,
                 component_name="custom",
                 sidebar_title="Fertility Tracker",
                 sidebar_icon="mdi:calendar-heart",
@@ -278,7 +286,10 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             if len(entries) == 1:
                 runtime = list(entries.values())[0]
         if runtime is None:
-            _LOGGER.warning("fertility_tracker service called but entry not found. entry_id=%s", entry_id)
+            _LOGGER.warning(
+                "fertility_tracker service called but entry not found. entry_id=%s",
+                entry_id,
+            )
         return runtime
 
     async def _svc_log_period_start(call: ServiceCall) -> None:
@@ -297,7 +308,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         date = coerce_date(call.data["date"])
         cycle_id = call.data.get("cycle_id")
         if cycle_id:
-            ok = runtime.data.edit_cycle(cycle_id=cycle_id, start=None, end=date, notes=None)
+            ok = runtime.data.edit_cycle(
+                cycle_id=cycle_id, start=None, end=date, notes=None
+            )
             if not ok:
                 _LOGGER.warning("cycle_id %s not found for period_end", cycle_id)
         else:
