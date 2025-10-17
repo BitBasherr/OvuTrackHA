@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -10,14 +11,25 @@ from homeassistant.const import CONF_NAME
 
 # ----- constants -----
 INTEGRATION_DOMAIN = "fertility_tracker"
+
+# repo root:  <repo>/tests/conftest.py  -> parents[1] = <repo>
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "custom_components" / INTEGRATION_DOMAIN
+
+# HA test runner always scans tests/custom_components/*
 TESTS_CC_ROOT = Path(__file__).resolve().parent / "custom_components"
 DST = TESTS_CC_ROOT / INTEGRATION_DOMAIN
 
 
-# ✅ Always mirror the real integration into tests/custom_components/
-# Home Assistant test loader *always* scans this path.
+# 0) Hardpoint PHACC to your repo's custom_components as well (belt + suspenders)
+#    This env var must be set before the PHACC fixture initializes. Doing it here
+#    works because conftest is imported before tests run.
+os.environ.setdefault(
+    "PYTEST_HOMEASSISTANT_CUSTOM_COMPONENTS",
+    str(REPO_ROOT / "custom_components"),
+)
+
+# 1) Mirror the integration under tests/custom_components so HA finds it for sure
 @pytest.fixture(autouse=True, scope="session")
 def _mirror_integration_into_tests_path():
     assert SRC.exists(), f"Expected integration at: {SRC}"
@@ -26,16 +38,16 @@ def _mirror_integration_into_tests_path():
         shutil.rmtree(DST)
     shutil.copytree(SRC, DST)
     yield
-    # leave the copied tree for post-failure debugging
+    # Keep the mirror for post-failure inspection
 
 
-# ✅ Enable custom integrations for the whole session
+# 2) Enable custom integrations for the whole session (PHACC)
 @pytest.fixture(autouse=True)
 def _enable_custom_integrations(enable_custom_integrations):
-    # Provided by pytest-homeassistant-custom-component
     yield
 
 
+# 3) Standard entry + setup fixtures for your tests
 @pytest.fixture
 def config_entry(hass: HomeAssistant) -> MockConfigEntry:
     entry = MockConfigEntry(
