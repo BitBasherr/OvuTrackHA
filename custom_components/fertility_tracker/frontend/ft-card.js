@@ -1,8 +1,9 @@
 // Fertility Tracker Lovelace card (no build step)
-// Resource URL: /fertility_tracker_frontend/ft-card.js
-// Card type: custom:fertility-tracker-card
+// Put this file at: /config/www/fertility_tracker/ft-card.js
+// Add as a resource: /local/fertility_tracker/ft-card.js  (type: JavaScript module)
+// Card type in Lovelace: custom:fertility-tracker-card
 
-(function () {
+(() => {
   const css = `
   .ft-card{padding:16px}
   .ft-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
@@ -64,21 +65,29 @@
     }
 
     async _bootstrap() {
-      this._entryId = this._config.entry_id || null;
+      // 1) explicit config, or remembered choice
+      this._entryId =
+        this._config.entry_id ||
+        window.localStorage.getItem("ft_entry_id") ||
+        null;
 
-      // Prefer our lightweight domain WS first; fall back to core list.
+      // 2) if unknown, ask our integration (works for non-admin users)
       if (!this._entryId) {
         try {
-          const res = await this._hass.callWS({ type: "fertility_tracker/list_entries" });
-          const ents = res?.entries || [];
-          if (ents.length) this._entryId = ents[0].entry_id;
+          const resp = await this._hass.callWS({ type: "fertility_tracker/list_entries" });
+          const entries = resp?.entries || [];
+          if (entries.length === 1) {
+            this._entryId = entries[0].entry_id;
+          } else if (entries.length > 1) {
+            this._choices = entries;
+          }
         } catch (e) {
-          // fallback
+          // fall back to admin-only API as a last resort
           try {
             const entries = await this._hass.callWS({ type: "config_entries/get_entries" });
             const match = entries.find((e) => e.domain === "fertility_tracker");
             if (match) this._entryId = match.entry_id;
-          } catch (_e) {}
+          } catch (_) {}
         }
       }
       await this._refresh();
@@ -99,6 +108,7 @@
           entry_id: this._entryId,
         });
       } catch (e) {
+        console.warn("fertility-tracker-card: list_cycles failed", e);
         this._data = null;
       }
       this._loading = false;
@@ -110,19 +120,16 @@
       await this._hass.callWS({
         type: "fertility_tracker/add_period",
         entry_id: this._entryId,
-        start,
-        ...(end ? { end } : {}),
-        ...(notes ? { notes } : {}),
+        start, end, notes,
       });
       await this._refresh();
     }
 
     async _editCycle(cycleId, start, end, notes) {
-      if (!this._entryId || !cycleId) return;
       await this._hass.callWS({
         type: "fertility_tracker/edit_cycle",
         entry_id: this._entryId,
-        cycle_id: cycleId,              // <-- backend expects cycle_id
+        cycle_id: cycleId,
         ...(start ? { start } : {}),
         ...(end ? { end } : {}),
         ...(notes != null ? { notes } : {}),
@@ -131,12 +138,11 @@
     }
 
     async _deleteCycle(cycleId) {
-      if (!this._entryId || !cycleId) return;
       if (!confirm("Delete this cycle?")) return;
       await this._hass.callWS({
         type: "fertility_tracker/delete_cycle",
         entry_id: this._entryId,
-        cycle_id: cycleId,              // <-- backend expects cycle_id
+        cycle_id: cycleId,
       });
       await this._refresh();
     }
@@ -163,12 +169,17 @@
     async _presetEndLastToday() {
       const last = this._lastCycle();
       if (!last) return;
-      await this._editCycle(last.cycle_id, null, todayLocalYMD(), last.notes || "");
+      await this._editCycle(last.id, null, todayLocalYMD(), last.notes || "");
     }
     async _presetShiftLastStart(delta) {
       const last = this._lastCycle();
       if (!last || !last.start) return;
-      await this._editCycle(last.cycle_id, ymdShift(last.start, delta), last.end || null, last.notes || "");
+      await this._editCycle(
+        last.id,
+        ymdShift(last.start, delta),
+        last.end || null,
+        last.notes || ""
+      );
     }
     _lastCycle() {
       const c = this._data?.cycles || [];
@@ -194,7 +205,27 @@
         return;
       }
 
+      // If there are multiple entries, let the user pick one
       if (!this._entryId) {
+        if (this._choices?.length > 1) {
+          body += `<div>Select tracker:
+            <select id="ft-pick">
+              ${this._choices.map(c => `<option value="${c.entry_id}">${c.name}</option>`).join("")}
+            </select>
+            <button id="ft-use">Use</button>
+          </div></div>`;
+          this._root.innerHTML = body;
+          this._root.querySelector("#ft-refresh")?.addEventListener("click", () => this._refresh());
+          this._root.querySelector("#ft-use")?.addEventListener("click", async () => {
+            const sel = this._root.querySelector("#ft-pick").value;
+            if (sel) {
+              this._entryId = sel;
+              localStorage.setItem("ft_entry_id", sel);
+              await this._refresh();
+            }
+          });
+          return;
+        }
         body += `<div>No <code>fertility_tracker</code> entry found. Create one in “Devices & Services”.</div></div>`;
         this._root.innerHTML = body;
         this._root.querySelector("#ft-refresh")?.addEventListener("click", () => this._refresh());
@@ -240,9 +271,8 @@
         const start = c.start || "";
         const end = c.end || "";
         const notes = c.notes || "";
-        const cid = c.cycle_id || c.id || "";  // tolerate both, prefer cycle_id
         rows += `
-          <tr data-cid="${cid}">
+          <tr data-id="${c.id}">
             <td><input type="date" class="ft-start" value="${start}"></td>
             <td><input type="date" class="ft-end" value="${end}"></td>
             <td><input type="text" class="ft-notes" value="${notes}"></td>
@@ -286,28 +316,33 @@
         this._root.querySelector("#ft-sex-note").value = "";
       });
 
-      this._root.querySelectorAll("tr[data-cid]").forEach((row) => {
-        const cid = row.getAttribute("data-cid");
+      this._root.querySelectorAll("tr[data-id]").forEach((row) => {
+        const id = row.getAttribute("data-id");
         row.querySelector(".ft-save")?.addEventListener("click", async () => {
           const start = row.querySelector(".ft-start").value || null;
           const end = row.querySelector(".ft-end").value || null;
           const notes = row.querySelector(".ft-notes").value ?? null;
-          await this._editCycle(cid, start || null, end || null, notes ?? null);
+          await this._editCycle(id, start || null, end || null, notes ?? null);
         });
         row.querySelector(".ft-del")?.addEventListener("click", async () => {
-          await this._deleteCycle(cid);
+          await this._deleteCycle(id);
         });
       });
     }
   }
 
-  customElements.define("fertility-tracker-card", FertilityTrackerCard);
+  // Avoid "already defined" if resource is added twice
+  if (!customElements.get("fertility-tracker-card")) {
+    customElements.define("fertility-tracker-card", FertilityTrackerCard);
+  }
 
-  // Show in the card picker
+  // Make it show up in “+ Add Card → By URL”
   window.customCards = window.customCards || [];
-  window.customCards.push({
-    type: "fertility-tracker-card",
-    name: "Fertility Tracker",
-    description: "Quickly add/edit cycles; updates the Fertility Tracker calendar.",
-  });
+  if (!window.customCards.find(c => c.type === "fertility-tracker-card")) {
+    window.customCards.push({
+      type: "fertility-tracker-card",
+      name: "Fertility Tracker",
+      description: "Quickly add/edit cycles; updates the Fertility Tracker calendar.",
+    });
+  }
 })();
