@@ -1,4 +1,3 @@
-# custom_components/fertility_tracker/__init__.py
 from __future__ import annotations
 
 import datetime as dt
@@ -16,7 +15,6 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.components import websocket_api
 from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util  # use HA's timezone helpers
-from homeassistant.setup import async_when_setup  # <-- correct hook for waiting on http
 
 from .const import (
     DOMAIN,
@@ -71,9 +69,15 @@ class EntryRuntime:
             recent_window=entry.options.get(CONF_RECENT_WINDOW, DEFAULT_RECENT_WINDOW),
             notify_services=list(entry.options.get(CONF_NOTIFY_SERVICES, [])),
             trigger_entities=list(entry.options.get(CONF_TRIGGER_ENTITIES, [])),
-            quiet_hours_start=entry.options.get(CONF_QUIET_HOURS_START, DEFAULT_QUIET_HOURS_START),
-            quiet_hours_end=entry.options.get(CONF_QUIET_HOURS_END, DEFAULT_QUIET_HOURS_END),
-            daily_reminder_time=entry.options.get(CONF_DAILY_REMINDER_TIME, DEFAULT_DAILY_REMINDER_TIME),
+            quiet_hours_start=entry.options.get(
+                CONF_QUIET_HOURS_START, DEFAULT_QUIET_HOURS_START
+            ),
+            quiet_hours_end=entry.options.get(
+                CONF_QUIET_HOURS_END, DEFAULT_QUIET_HOURS_END
+            ),
+            daily_reminder_time=entry.options.get(
+                CONF_DAILY_REMINDER_TIME, DEFAULT_DAILY_REMINDER_TIME
+            ),
             cycles=[],
             sex_events=[],
             pregnancy_tests=[],
@@ -98,7 +102,9 @@ class EntryRuntime:
             self._timer_unsub()
             self._timer_unsub = None
 
-        target_time = parse_time(self.data.daily_reminder_time) or parse_time(DEFAULT_DAILY_REMINDER_TIME)
+        target_time = parse_time(self.data.daily_reminder_time)
+        if target_time is None:
+            target_time = parse_time(DEFAULT_DAILY_REMINDER_TIME)
 
         @callback
         def _daily_reminder(now: dt.datetime) -> None:
@@ -122,7 +128,9 @@ class EntryRuntime:
             self._listeners.clear()
 
         for ent_id in self.data.trigger_entities:
-            unsub = async_track_state_change_event(self.hass, ent_id, self._trigger_entity_changed)
+            unsub = async_track_state_change_event(
+                self.hass, ent_id, self._trigger_entity_changed
+            )
             self._listeners.append(unsub)
 
     async def async_unload(self) -> None:
@@ -157,7 +165,9 @@ class EntryRuntime:
 
         today = today_local(self.hass).date()
         if abs((metrics.next_period_date - today).days) <= 1:
-            already = any(c.start <= today <= (c.end or c.start) for c in self.data.cycles)
+            already = any(
+                c.start <= today <= (c.end or c.start) for c in self.data.cycles
+            )
             if not already:
                 await self._send_notifications(
                     title=f"{self.data.name}: Period check",
@@ -174,8 +184,12 @@ class EntryRuntime:
             end = parse_time(self.data.quiet_hours_end)
             if start is None or end is None:
                 return False
-            start_dt = now.replace(hour=start.hour, minute=start.minute, second=start.second, microsecond=0)
-            end_dt = now.replace(hour=end.hour, minute=end.minute, second=end.second, microsecond=0)
+            start_dt = now.replace(
+                hour=start.hour, minute=start.minute, second=start.second, microsecond=0
+            )
+            end_dt = now.replace(
+                hour=end.hour, minute=end.minute, second=end.second, microsecond=0
+            )
             if start_dt <= end_dt:
                 return start_dt <= now <= end_dt
             return now >= start_dt or now <= end_dt  # spans midnight
@@ -220,88 +234,28 @@ class EntryRuntime:
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up global UI bits if the relevant core integrations are present."""
-
-    async def _register_static(_: HomeAssistant, __: str) -> None:
-        """Register /fertility_tracker_frontend -> custom_components/fertility_tracker/frontend."""
-        http = getattr(hass, "http", None)
-        if not http:
-            _LOGGER.debug("HTTP not available; skipping static path registration")
-            return
-        path = hass.config.path("custom_components/fertility_tracker/frontend")
+    # Optional: try to expose /fertility_tracker_frontend if HTTP supports it
+    http = getattr(hass, "http", None)
+    if http is not None and hasattr(http, "register_static_path"):
+        # Older cores had register_static_path; if not present we'll just skip.
         try:
-            # New API (HA 2024.x+)
-            if hasattr(http, "async_register_static_paths"):
-                try:
-                    from homeassistant.components.http import StaticPathConfig  # type: ignore
-                except Exception:  # very old core
-                    StaticPathConfig = None  # type: ignore
-                if StaticPathConfig:
-                    await http.async_register_static_paths(
-                        [
-                            StaticPathConfig(
-                                url_path="/fertility_tracker_frontend",
-                                path=path,
-                                cache_headers=True,
-                                require_auth=True,
-                            )
-                        ]
-                    )
-                    _LOGGER.debug("Registered static path via async_register_static_paths")
-                else:
-                    # Fallback: single path method if present
-                    if hasattr(http, "register_static_path"):
-                        http.register_static_path(
-                            "/fertility_tracker_frontend",
-                            path,
-                            cache_headers=True,
-                            require_auth=True,
-                            name="Fertility Tracker Frontend",
-                            allow_directory=True,
-                        )
-                        _LOGGER.debug("Registered static path via legacy register_static_path (no StaticPathConfig)")
-            # Older API
-            elif hasattr(http, "register_static_path"):
-                http.register_static_path(
-                    "/fertility_tracker_frontend",
-                    path,
-                    cache_headers=True,
-                    require_auth=True,
-                    name="Fertility Tracker Frontend",
-                    allow_directory=True,
-                )
-                _LOGGER.debug("Registered static path via legacy register_static_path")
-            else:
-                _LOGGER.debug("No static path registration method on HomeAssistantHTTP")
-        except Exception as exc:  # pragma: no cover
-            _LOGGER.debug("Static path registration failed: %s", exc)
-
-    # If http is already up, register now; otherwise wait for it
-    if "http" in hass.config.components:
-        hass.async_create_task(_register_static(hass, "http"))
-    else:
-        async_when_setup(hass, "http", _register_static)
-
-    # Optional: register sidebar panel **only** if frontend is ready
-    if "frontend" in hass.config.components:
-        try:
-            # panel served from the same folder: /fertility_tracker_frontend/panel.js
-            hass.components.frontend.async_register_built_in_panel(  # type: ignore[attr-defined]
-                component_name="fertility-tracker",  # must match custom element name in panel.js
-                sidebar_title="Fertility Tracker",
-                sidebar_icon="mdi:calendar-heart",
-                frontend_url_path="fertility-tracker",
-                config={
-                    "module_url": "/fertility_tracker_frontend/panel.js",
-                    "title": "Fertility Tracker",
-                },
-                require_admin=False,
+            http.register_static_path(
+                "/fertility_tracker_frontend",
+                hass.config.path("custom_components/fertility_tracker/frontend"),
+                cache_headers=True,
+                require_auth=True,
+                name="Fertility Tracker Frontend",
+                allow_directory=True,
             )
         except Exception as exc:  # pragma: no cover
-            _LOGGER.debug("Frontend not ready; skipping panel registration: %s", exc)
+            _LOGGER.debug(
+                "Static path registration skipped (incompatible core): %s", exc
+            )
     else:
-        _LOGGER.debug("Frontend not loaded; skipping panel registration")
+        _LOGGER.debug("HTTP not loaded or register_static_path unavailable; skipping")
 
-    # WebSocket API registrations (voluptuous schemas)
+    # WebSocket API registrations
+    websocket_api.async_register_command(hass, ws_list_entries)  # NEW
     websocket_api.async_register_command(hass, ws_list_cycles)
     websocket_api.async_register_command(hass, ws_add_period)
     websocket_api.async_register_command(hass, ws_edit_cycle)
@@ -355,7 +309,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             return
         protected = bool(call.data["protected"])
         notes = call.data.get("notes")
-        runtime.data.sex_events.append(SexEvent(ts=today_local(hass), protected=protected, notes=notes))
+        runtime.data.sex_events.append(
+            SexEvent(ts=today_local(hass), protected=protected, notes=notes)
+        )
         await runtime.async_save()
 
     hass.services.async_register(DOMAIN, "log_period_start", _svc_log_period_start)
@@ -394,6 +350,22 @@ def _get_runtime(hass: HomeAssistant, entry_id: str) -> EntryRuntime:
 
 
 # -------------------- WebSocket API (voluptuous schemas) --------------------
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "fertility_tracker/list_entries"}
+)
+@websocket_api.async_response
+async def ws_list_entries(hass, connection, msg):
+    """Return available fertility_tracker entries for non-admin clients."""
+    items = []
+    for entry_id, runtime in hass.data.get(DOMAIN, {}).items():
+        title = getattr(getattr(runtime, "data", None), "name", None)
+        if not title:
+            ce = hass.config_entries.async_get_entry(entry_id)
+            title = ce.title if ce else "Fertility Tracker"
+        items.append({"entry_id": entry_id, "name": title})
+    connection.send_result(msg["id"], {"entries": items})
+
 
 @websocket_api.websocket_command(
     {
