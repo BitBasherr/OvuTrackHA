@@ -1,158 +1,105 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import List
+from typing import List, Optional
 
 from homeassistant.core import HomeAssistant
-from homeassistant.util import dt as dt_util
 from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.device_registry import DeviceEntryType
+from homeassistant.util import dt as dt_util
 from homeassistant.components.calendar import (
     CalendarEntity,
     CalendarEvent,
 )
 
 from .const import DOMAIN
-from .helpers import calculate_metrics_for_date, today_local, FertilityData
+from .helpers import FertilityData
+
+# How many days ahead to search when picking the "current/next" event for .event
+_LOOKAHEAD_DAYS_FOR_EVENT = 60
+# Default period length (only used if a cycle is open-ended)
+_DEFAULT_PERIOD_LENGTH_DAYS = 5
 
 
-# ---------------- Time helpers ----------------
+def _as_local_datetime(d: dt.date | dt.datetime, tz: dt.tzinfo) -> dt.datetime:
+    """Return a timezone-aware local datetime for either a date or datetime."""
+    if isinstance(d, dt.datetime):
+        if d.tzinfo is None:
+            return d.replace(tzinfo=tz)
+        return d.astimezone(tz)
+    # date → local midnight
+    return dt.datetime(d.year, d.month, d.day, tzinfo=tz)
 
 
-def _local_tz(hass: HomeAssistant) -> dt.tzinfo:
-    """Return Home Assistant's configured timezone object."""
-    return dt_util.get_time_zone(hass.config.time_zone)
+def _end_exclusive(end_like: dt.date | dt.datetime, tz: dt.tzinfo) -> dt.datetime:
+    """Return an exclusive end datetime (HA calendar treats end as exclusive)."""
+    if isinstance(end_like, dt.datetime):
+        if end_like.tzinfo is None:
+            end_like = end_like.replace(tzinfo=tz)
+        else:
+            end_like = end_like.astimezone(tz)
+        # push a microsecond to make it exclusive
+        return end_like + dt.timedelta(microseconds=1)
+    # For dates, end-exclusive is next day 00:00
+    return _as_local_datetime(end_like, tz) + dt.timedelta(days=1)
 
 
-def _is_naive(d: dt.datetime) -> bool:
-    """Return True if datetime is naive (no tzinfo)."""
-    return d.tzinfo is None or d.tzinfo.utcoffset(d) is None
-
-
-def _as_local(hass: HomeAssistant, value: dt.date | dt.datetime) -> dt.datetime:
-    """Coerce a date/datetime to a timezone-aware local datetime.
-
-    - date -> local midnight
-    - naive datetime -> assume local tz
-    - aware datetime -> convert to local tz
-    """
-    tz = _local_tz(hass)
-
-    if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
-        return dt.datetime(value.year, value.month, value.day, tzinfo=tz)
-
-    assert isinstance(value, dt.datetime)
-    if _is_naive(value):
-        return value.replace(tzinfo=tz)
-    return value.astimezone(tz)
-
-
-def _overlaps(a_start: dt.datetime, a_end: dt.datetime, b_start: dt.datetime, b_end: dt.datetime) -> bool:
-    """Return True if [a_start, a_end) overlaps [b_start, b_end)."""
-    return a_start < b_end and a_end > b_start
-
-
-def _clamp_to_range(start: dt.datetime, end: dt.datetime, r_start: dt.datetime, r_end: dt.datetime) -> tuple[dt.datetime, dt.datetime] | None:
-    """Clamp an interval to a range, return None if no overlap."""
-    if not _overlaps(start, end, r_start, r_end):
-        return None
-    return max(start, r_start), min(end, r_end)
-
-
-# ---------------- Platform setup ----------------
-
-
-async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities) -> None:
-    runtime = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([FertilityCalendarEntity(hass, runtime, entry.entry_id, runtime.data.name)])
-
-
-# ---------------- Entity ----------------
-
-
-class FertilityCalendarEntity(CalendarEntity):
-    """Calendar exposing period history + predicted fertile/implantation windows."""
+class FertilityTrackerCalendar(CalendarEntity):
+    """Calendar that exposes period days (and can be extended later)."""
 
     _attr_has_entity_name = True
 
-    def __init__(self, hass: HomeAssistant, runtime, entry_id: str, name: str) -> None:
+    def __init__(self, hass: HomeAssistant, entry_id: str, data: FertilityData) -> None:
         self.hass = hass
-        self._runtime = runtime
         self._entry_id = entry_id
-        self._name = f"{name} Calendar"
-        self._unique_id = f"{entry_id}_calendar"
-        # Keep event state simple; we return None and only serve ranges via async_get_events
-        self._event: CalendarEvent | None = None
+        self._data = data
+        self._attr_unique_id = f"{entry_id}_calendar"
+        self._attr_name = f"{data.name} Calendar"
+        self._event: Optional[CalendarEvent] = None
 
-        # Device metadata (keeps calendar grouped with the rest of the integration)
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry_id)},
-            entry_type=DeviceEntryType.SERVICE,
+            name=data.name,
             manufacturer="Fertility Tracker",
-            name=name,
+            model="Cycle calendar",
         )
 
-    # ---- CalendarEntity required bits
-
-    @property
-    def name(self) -> str | None:  # entity display name
-        return self._name
-
-    @property
-    def unique_id(self) -> str | None:
-        return self._unique_id
+    # ---------- Core Calendar API ----------
 
     @property
     def event(self) -> CalendarEvent | None:
-        # We do not persist a "next event" for the on/off state; leaving None is fine.
-        # (HA will show "off" state; tests only use async_get_events)
+        """Return the current or next event for HA to show as entity state."""
         return self._event
 
-    # ---- Event production
+    async def async_update(self) -> None:
+        """Set .event to the current ongoing or next upcoming event.
 
-    def _build_static_events(self, data: FertilityData, range_start: dt.datetime, range_end: dt.datetime) -> list[CalendarEvent]:
-        """Convert stored cycle history into all-day 'Period' events."""
-        tz = _local_tz(self.hass)
-        events: list[CalendarEvent] = []
-        for c in data.cycles:
-            start = _as_local(self.hass, c.start)  # local midnight
-            # Periods are all-day; end is exclusive (next day after the last logged date).
-            period_end_date = c.end if c.end else c.start  # if end missing, treat as 1-day
-            end = _as_local(self.hass, period_end_date) + dt.timedelta(days=1)
+        HA calls this to decide if the entity is 'on' and what to show.
+        """
+        tz = dt_util.get_time_zone(self.hass.config.time_zone)
+        now = dt_util.now(tz)
+        # Look back a little to catch events that started just before now.
+        start = now - dt.timedelta(days=1)
+        end = now + dt.timedelta(days=_LOOKAHEAD_DAYS_FOR_EVENT)
+        events = await self.async_get_events(self.hass, start, end)
 
-            clamped = _clamp_to_range(start, end, range_start, range_end)
-            if not clamped:
-                continue
-            s, e = clamped
-            events.append(CalendarEvent(summary="Period", start=s.astimezone(tz), end=e.astimezone(tz)))
-        return events
+        current: Optional[CalendarEvent] = None
+        upcoming: Optional[CalendarEvent] = None
+        for ev in events:
+            ev_start = _as_local_datetime(ev.start, tz)
+            ev_end = _as_local_datetime(ev.end, tz)
+            # CalendarEvent should be end-exclusive; be defensive:
+            if ev_end <= ev_start:
+                ev_end = ev_start + dt.timedelta(minutes=1)
 
-    def _build_predicted_events(self, data: FertilityData, range_start: dt.datetime, range_end: dt.datetime) -> list[CalendarEvent]:
-        """Add predicted fertile and implantation windows (all-day ranges)."""
-        tz = _local_tz(self.hass)
-        events: list[CalendarEvent] = []
+            if ev_start <= now < ev_end and current is None:
+                current = ev
+            if ev_start >= now and upcoming is None:
+                upcoming = ev
 
-        # Use "today" to compute next ovulation / windows (freezegun in tests fixes this)
-        metrics = calculate_metrics_for_date(data, today_local(self.hass))
+            if current and upcoming:
+                break
 
-        # Helper to push an all-day range if present
-        def push(summary: str, start_d: dt.date | None, end_d: dt.date | None):
-            if not start_d or not end_d:
-                return
-            start = _as_local(self.hass, start_d)
-            end = _as_local(self.hass, end_d)  # end is inclusive date -> +1 day below
-            # Make event exclusive at end of range
-            end = end + dt.timedelta(days=1)
-            clamped = _clamp_to_range(start, end, range_start, range_end)
-            if not clamped:
-                return
-            s, e = clamped
-            events.append(CalendarEvent(summary=summary, start=s.astimezone(tz), end=e.astimezone(tz)))
-
-        push("Fertile Window", metrics.fertile_window_start, metrics.fertile_window_end)
-        push("Implantation Window", metrics.implantation_window_start, metrics.implantation_window_end)
-
-        return events
+        self._event = current or upcoming
 
     async def async_get_events(
         self,
@@ -160,17 +107,63 @@ class FertilityCalendarEntity(CalendarEntity):
         start_date: dt.datetime,
         end_date: dt.datetime,
     ) -> List[CalendarEvent]:
-        """Return events between start_date (inclusive) and end_date (exclusive)."""
-        # Normalize boundaries to local tz
-        start_local = _as_local(hass, start_date)
-        end_local = _as_local(hass, end_date)
+        """Return events between start_date (inclusive) and end_date (exclusive).
 
-        data: FertilityData = self._runtime.data
+        Currently exposes period days based on stored cycles. You can enrich this
+        later with predicted ovulation/fertility windows, tests, etc.
+        """
+        tz = dt_util.get_time_zone(hass.config.time_zone)
 
-        events: list[CalendarEvent] = []
-        events.extend(self._build_static_events(data, start_local, end_local))
-        events.extend(self._build_predicted_events(data, start_local, end_local))
+        # Normalize window to local-aware datetimes
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=tz)
+        else:
+            start_date = start_date.astimezone(tz)
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=tz)
+        else:
+            end_date = end_date.astimezone(tz)
 
-        # Sort deterministically by start
-        events.sort(key=lambda e: (e.start, e.end, e.summary))
+        events: List[CalendarEvent] = []
+
+        # Build period events from cycles
+        for c in self._data.cycles:
+            if not c.start:
+                continue
+
+            # Start datetime (inclusive)
+            p_start = _as_local_datetime(c.start, tz)
+
+            # If the cycle has an explicit end, use it; otherwise default length
+            if c.end:
+                p_end_exclusive = _end_exclusive(c.end, tz)
+            else:
+                # open-ended cycle → assume default period length
+                assumed_end = c.start + dt.timedelta(days=_DEFAULT_PERIOD_LENGTH_DAYS - 1)
+                p_end_exclusive = _end_exclusive(assumed_end, tz)
+
+            # Window overlap test (event intersects the query range)
+            if p_start < end_date and p_end_exclusive > start_date:
+                events.append(
+                    CalendarEvent(
+                        summary="Period",
+                        start=p_start,
+                        end=p_end_exclusive,
+                        description=(c.notes or ""),
+                    )
+                )
+
+        # (Optional) Here is where you could add ovulation/implantation windows,
+        # using your existing helpers.calculate_metrics_for_date across a range.
+
+        # Sort chronologically
+        events.sort(key=lambda ev: _as_local_datetime(ev.start, tz))
         return events
+
+
+# ---------- Platform setup ----------
+
+async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
+    """Set up the calendar entity for an entry."""
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    async_add_entities([FertilityTrackerCalendar(hass, entry.entry_id, runtime.data)], True)
